@@ -85,15 +85,8 @@ def write_latest_snapshot(node_id: str, display_name: str, rows: list[dict], is_
         "source_meta": meta,  # e.g. how far this forecast actually reaches, issue cadence
         "rows": snapshot_rows,
     }
-    with open(DASHBOARD_DATA_DIR / "manifest.json", "w") as f:
-        json.dump(manifest, f)
-
-    # Separate from manifest.json (kept as a bare array so the frontend's
-    # existing manifest.map()/.find() calls don't need to change) -- this is
-    # when the run *started*, so the dashboard can show how stale the data is
-    # and flag it if a scheduled run gets missed.
-    with open(DASHBOARD_DATA_DIR / "run_status.json", "w") as f:
-        json.dump({"generated_at": datetime.now(timezone.utc).isoformat()}, f)
+    with open(DASHBOARD_DATA_DIR / f"{node_id}_latest.json", "w") as f:
+        json.dump(out, f)
 
 
 def main():
@@ -122,6 +115,13 @@ def main():
 
     with open(DASHBOARD_DATA_DIR / "manifest.json", "w") as f:
         json.dump(manifest, f)
+
+    # Separate from manifest.json (kept as a bare array so the frontend's
+    # existing manifest.map()/.find() calls don't need to change) -- this is
+    # when the run *started*, so the dashboard can show how stale the data is
+    # and flag it if a scheduled run gets missed.
+    with open(DASHBOARD_DATA_DIR / "run_status.json", "w") as f:
+        json.dump({"generated_at": datetime.now(timezone.utc).isoformat()}, f)
 
 
 if __name__ == "__main__":
