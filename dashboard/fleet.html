@@ -43,6 +43,9 @@
     font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
+  /* table-layout:fixed + no width:100% so the browser doesn't dump all
+     leftover space into the one column without an explicit width (the
+     label column) -- that was the cause of the big gap before the grid. */
   /* Column widths come from the <colgroup> rendered in JS (one fixed-px
      label column + N equal calc() shares for the rest) -- that's what
      stretches the table to fill the card instead of leaving blank space
@@ -206,7 +209,14 @@ async function loadFleet() {
 
   // Column label shows the day only when it changes across the sorted
   // column sequence, same decluttering as the detail chart's x-axis.
-  const sortedKeys = [...allKeys].sort();
+  // Plain string sort breaks once HE hits double digits (e.g. "HE10" sorts
+  // before "HE2" alphabetically) -- sort by date, then by the HE number
+  // parsed as an integer, so the columns actually run in chronological order.
+  const sortedKeys = [...allKeys].sort((a, b) => {
+    const dayA = a.slice(0, 10), dayB = b.slice(0, 10);
+    if (dayA !== dayB) return dayA < dayB ? -1 : 1;
+    return parseInt(a.slice(13), 10) - parseInt(b.slice(13), 10);
+  });
   let prevDay = null;
   heColumns = sortedKeys.map(key => {
     const [day, heStr] = [key.slice(0, 10), key.slice(11)];
