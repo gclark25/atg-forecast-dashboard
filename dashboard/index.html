@@ -211,4 +211,10 @@ document.getElementById('btn2h').onclick = () => {
   renderNodeButtons(manifest);
   const params = new URLSearchParams(location.search);
   const requested = params.get('node');
-  const match =
+  const match = manifest.find(n => n.node_id === requested);
+  if (match) await selectNode(match.node_id);
+  else if (manifest.length) await selectNode(manifest[0].node_id);
+})();
+</script>
+</body>
+</html>

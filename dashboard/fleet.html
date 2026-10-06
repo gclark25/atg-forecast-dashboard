@@ -214,4 +214,25 @@ function showTip(e, text) {
   const t = document.getElementById('tooltip');
   t.textContent = text;
   t.style.left = (e.clientX + 12) + 'px';
-  t.style.top = (e.clientY + 12) +
+  t.style.top = (e.clientY + 12) + 'px';
+  t.style.display = 'block';
+}
+function hideTip() { document.getElementById('tooltip').style.display = 'none'; }
+
+document.getElementById('btnMedian').onclick = () => {
+  metric = 'q50';
+  document.getElementById('btnMedian').classList.add('active');
+  document.getElementById('btnTail').classList.remove('active');
+  render();
+};
+document.getElementById('btnTail').onclick = () => {
+  metric = 'q95';
+  document.getElementById('btnTail').classList.add('active');
+  document.getElementById('btnMedian').classList.remove('active');
+  render();
+};
+
+loadFleet();
+</script>
+</body>
+</html>
