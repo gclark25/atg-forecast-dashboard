@@ -8,7 +8,7 @@
   h1 { font-size: 20px; margin-bottom: 4px; }
   .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
   a.backlink { font-size: 13px; color: #1f3864; text-decoration: none; }
-  .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+  .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
   .controls button {
     padding: 6px 14px; border-radius: 6px; border: 1px solid #d1d5db;
     background: #fff; cursor: pointer; font-size: 13px;
@@ -17,8 +17,13 @@
   .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #6b7280; margin-left: auto; }
   .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #E6F1FB, #378ADD, #042C53); }
   .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow-x: auto; }
+  .error-box {
+    background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
+    font-size: 13px; margin-bottom: 16px; display: none; font-family: monospace; white-space: pre-wrap;
+  }
+  .error-box.show { display: block; }
   table.heat { border-collapse: collapse; font-size: 11px; width: 100%; }
-  table.heat th { font-weight: 500; color: #6b7280; padding: 2px 4px; text-align: center; }
+  table.heat th { font-weight: 500; color: #6b7280; padding: 2px 4px; text-align: center; white-space: pre-line; }
   table.heat td.node-label {
     text-align: left; padding: 3px 10px 3px 4px; white-space: nowrap; font-size: 12px;
     cursor: pointer; position: sticky; left: 0; background: #fff;
@@ -39,6 +44,8 @@
 <h1>ATG Fleet Overview</h1>
 <div class="subtitle" id="subtitle">Loading fleet data...</div>
 
+<div class="error-box" id="errorBox"></div>
+
 <div class="controls">
   <button id="btnMedian" class="active">Median (q50)</button>
   <button id="btnTail">Tail risk (q95)</button>
@@ -53,37 +60,96 @@
 
 <script>
 let metric = 'q50';
-let fleetData = []; // [{node_id, display_name, weak_tail_node, hourly: [val_or_null, ...]}]
+let fleetData = []; // [{node_id, display_name, weak_tail_node, byHe: Map(heKey -> {q50,q95,operatingDay,he})}]
+let heColumns = []; // ordered list of {key, label, operatingDay, he}
+
+// ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
+function ctParts(iso) {
+  const d = new Date(iso);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(d).map(p => [p.type, p.value]));
+  let hour = parseInt(parts.hour, 10);
+  if (hour === 24) hour = 0;
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour, minute: parseInt(parts.minute, 10) };
+}
+function heInfo(iso) {
+  const { date, hour, minute } = ctParts(iso);
+  const he = hour + 1;
+  const quarter = Math.floor(minute / 15);
+  const key = `${date}-HE${he}`;
+  const label = `HE${he}\n${date.slice(5)}`;
+  return { operatingDay: date, he, quarter, key, label };
+}
+
+function showError(msg) {
+  const box = document.getElementById('errorBox');
+  box.textContent = msg;
+  box.classList.add('show');
+}
+
+async function fetchJson(path) {
+  const res = await fetch(path + '?_=' + Date.now());
+  if (!res.ok) throw new Error(`${path} returned HTTP ${res.status}`);
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${path} did not return valid JSON (got: ${text.slice(0, 120)}...)`);
+  }
+}
 
 async function loadFleet() {
-  const manifestRes = await fetch('data/manifest.json?_=' + Date.now());
-  const manifest = await manifestRes.json();
+  let manifest;
+  try {
+    manifest = await fetchJson('data/manifest.json');
+  } catch (e) {
+    showError(`Failed to load manifest: ${e.message}`);
+    document.getElementById('heatContainer').textContent = '';
+    return;
+  }
 
   const results = await Promise.all(manifest.map(async (m) => {
     try {
-      const res = await fetch(`data/${m.node_id}_latest.json?_=` + Date.now());
-      const data = await res.json();
+      const data = await fetchJson(`data/${m.node_id}_latest.json`);
       return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: data.rows || [] };
     } catch (e) {
-      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: [] };
+      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: [], loadError: e.message };
     }
   }));
 
-  // Bucket each node's rows into hour-of-horizon buckets 0..23, taking the
-  // first row whose horizon_hours falls in [h, h+1). Nodes don't share the
-  // same origin minute, so "hours ahead" is the fair way to line them up --
-  // not wall-clock time.
-  fleetData = results.map((n) => {
-    const hourly = [];
-    for (let h = 0; h < 24; h++) {
-      const row = n.rows.find(r => r.horizon_hours >= h && r.horizon_hours < h + 1);
-      hourly.push(row ? { q50: row.q50, q95: row.q95 } : null);
+  const failed = results.filter(r => r.loadError);
+  if (failed.length) {
+    showError(`${failed.length} node(s) failed to load: ${failed.map(f => f.node_id).join(', ')}`);
+  }
+
+  // Group every row by its own real HE bucket (Central Time), not by
+  // horizon-hours-from-origin -- nodes don't share an origin minute, but
+  // "HE18 on Oct 6" means the same thing for every node, so this is the
+  // framing that actually lines the fleet up for an operational question.
+  const allKeys = new Set();
+  const withBuckets = results.map((n) => {
+    const byHe = new Map();
+    for (const r of n.rows) {
+      const info = heInfo(r.target_time);
+      if (!byHe.has(info.key)) {
+        byHe.set(info.key, { q50: r.q50, q95: r.q95, operatingDay: info.operatingDay, he: info.he, label: info.label });
+        allKeys.add(info.key);
+      }
     }
-    return { ...n, hourly };
-  }).filter(n => n.hourly.some(h => h !== null));
+    return { ...n, byHe };
+  }).filter(n => n.byHe.size > 0);
+
+  heColumns = [...allKeys].sort().map(key => {
+    for (const n of withBuckets) if (n.byHe.has(key)) return { key, label: n.byHe.get(key).label };
+  });
+
+  fleetData = withBuckets;
 
   document.getElementById('subtitle').textContent =
-    `${fleetData.length} nodes with live data, bucketed by hours-ahead (not wall clock -- nodes don't share an origin minute)`;
+    `${fleetData.length} nodes with live data, columns are real ERCOT Hour-Ending intervals in Central Time (not horizon-relative)`;
 
   render();
 }
@@ -107,29 +173,35 @@ function textColorFor(value, min, max) {
 }
 
 function render() {
-  const allVals = fleetData.flatMap(n => n.hourly.filter(Boolean).map(h => h[metric]));
+  if (!heColumns.length) {
+    document.getElementById('heatContainer').textContent = 'No data to display.';
+    return;
+  }
+
+  const allVals = fleetData.flatMap(n => [...n.byHe.values()].map(h => h[metric]));
   const min = Math.min(...allVals);
   const max = Math.max(...allVals);
 
   const sorted = [...fleetData].sort((a, b) => {
-    const peakA = Math.max(...a.hourly.filter(Boolean).map(h => h[metric]));
-    const peakB = Math.max(...b.hourly.filter(Boolean).map(h => h[metric]));
+    const peakA = Math.max(...[...a.byHe.values()].map(h => h[metric]));
+    const peakB = Math.max(...[...b.byHe.values()].map(h => h[metric]));
     return peakB - peakA;
   });
 
   let html = '<table class="heat"><tr><th></th>';
-  for (let h = 0; h < 24; h++) html += `<th>+${h}h</th>`;
+  for (const col of heColumns) html += `<th>${col.label}</th>`;
   html += '</tr>';
 
   for (const n of sorted) {
     html += `<tr><td class="node-label" onclick="location.href='index.html?node=${n.node_id}'">${n.display_name}`;
     if (n.weak_tail_node) html += `<span class="weak-tail-flag" title="Known weak tail calibration (q90/q95 under-covers actual prices)">&#9888;</span>`;
     html += `</td>`;
-    for (const h of n.hourly) {
-      const val = h ? h[metric] : null;
+    for (const col of heColumns) {
+      const cell = n.byHe.get(col.key);
+      const val = cell ? cell[metric] : null;
       const bg = colorFor(val, min, max);
       const fg = val !== null ? textColorFor(val, min, max) : '#999';
-      const label = val !== null ? `${n.display_name} +${n.hourly.indexOf(h)}h: $${val.toFixed(0)}/MWh` : 'no data';
+      const label = val !== null ? `${n.display_name} ${col.label.replace('\n', ' ')}: $${val.toFixed(0)}/MWh` : 'no data';
       html += `<td class="cell" style="background:${bg};color:${fg}" onmousemove="showTip(event,'${label}')" onmouseleave="hideTip()" onclick="location.href='index.html?node=${n.node_id}'">${val !== null ? Math.round(val) : ''}</td>`;
     }
     html += '</tr>';
@@ -142,25 +214,4 @@ function showTip(e, text) {
   const t = document.getElementById('tooltip');
   t.textContent = text;
   t.style.left = (e.clientX + 12) + 'px';
-  t.style.top = (e.clientY + 12) + 'px';
-  t.style.display = 'block';
-}
-function hideTip() { document.getElementById('tooltip').style.display = 'none'; }
-
-document.getElementById('btnMedian').onclick = () => {
-  metric = 'q50';
-  document.getElementById('btnMedian').classList.add('active');
-  document.getElementById('btnTail').classList.remove('active');
-  render();
-};
-document.getElementById('btnTail').onclick = () => {
-  metric = 'q95';
-  document.getElementById('btnTail').classList.add('active');
-  document.getElementById('btnMedian').classList.remove('active');
-  render();
-};
-
-loadFleet();
-</script>
-</body>
-</html>
+  t.style.top = (e.clientY + 12) +

@@ -10,16 +10,27 @@
   .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 20px; }
   .node-select { margin-bottom: 16px; }
   .node-select button {
-    padding: 6px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid #d1d5db;
+    padding: 6px 14px; margin-right: 8px; margin-bottom: 6px; border-radius: 6px; border: 1px solid #d1d5db;
     background: #fff; cursor: pointer; font-size: 13px;
   }
   .node-select button.active { background: #1f3864; color: #fff; border-color: #1f3864; }
+  .view-toggle { margin-bottom: 16px; }
+  .view-toggle button {
+    padding: 6px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid #d1d5db;
+    background: #fff; cursor: pointer; font-size: 13px;
+  }
+  .view-toggle button.active { background: #0f6e56; color: #fff; border-color: #0f6e56; }
   .card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px; }
   .caveat {
     background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
     font-size: 13px; margin-bottom: 16px; display: none;
   }
   .caveat.show { display: block; }
+  .error-box {
+    background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
+    font-size: 13px; margin-bottom: 16px; display: none; font-family: monospace; white-space: pre-wrap;
+  }
+  .error-box.show { display: block; }
   .meta { font-size: 12px; color: #6b7280; margin-top: 8px; }
   canvas { max-height: 420px; }
 </style>
@@ -28,7 +39,9 @@
 
 <a href="fleet.html" style="font-size: 13px; color: #1f3864; text-decoration: none;">&larr; Fleet overview (all nodes)</a>
 <h1>ATG Metis 1 Preview -- HEN Nodal Price Forecasts</h1>
-<div class="subtitle">Current quantile forecast (q05-q95) by node. Refreshed on the ingestion schedule -- see "origin time" below the chart.</div>
+<div class="subtitle">Current quantile forecast (q05-q95) by node, labeled in ERCOT Hour-Ending (HE), Central Time.</div>
+
+<div class="error-box" id="errorBox"></div>
 
 <div class="node-select" id="nodeSelect"></div>
 
@@ -39,6 +52,11 @@
   off it directly.
 </div>
 
+<div class="view-toggle">
+  <button id="btn24h" class="active">24-hour horizon (HE)</button>
+  <button id="btn2h">Next 2 hours (15min)</button>
+</div>
+
 <div class="card">
   <canvas id="forecastChart"></canvas>
   <div class="meta" id="chartMeta"></div>
@@ -47,15 +65,44 @@
 <script>
 let currentNode = null;
 let chart = null;
+let currentData = null;
+let viewMode = '24h';
 
-async function loadManifest() {
-  const res = await fetch('data/manifest.json?_=' + Date.now());
-  return res.json();
+// ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
+function ctParts(iso) {
+  const d = new Date(iso);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(d).map(p => [p.type, p.value]));
+  let hour = parseInt(parts.hour, 10);
+  if (hour === 24) hour = 0;
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour, minute: parseInt(parts.minute, 10) };
+}
+function heInfo(iso) {
+  const { date, hour, minute } = ctParts(iso);
+  const he = hour + 1; // ERCOT Hour Ending: HE1 = 00:00-01:00 CT ... HE24 = 23:00-24:00 CT
+  const quarter = Math.floor(minute / 15); // 0=:00, 1=:15, 2=:30, 3=:45
+  const label = `HE${he}` + (quarter ? `:${String(quarter * 15).padStart(2, '0')}` : '');
+  return { operatingDay: date, he, quarter, label };
 }
 
-async function loadNodeData(nodeId) {
-  const res = await fetch(`data/${nodeId}_latest.json?_=` + Date.now());
-  return res.json();
+function showError(msg) {
+  const box = document.getElementById('errorBox');
+  box.textContent = msg;
+  box.classList.add('show');
+}
+
+async function fetchJson(path) {
+  const res = await fetch(path + '?_=' + Date.now());
+  if (!res.ok) throw new Error(`${path} returned HTTP ${res.status}`);
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${path} did not return valid JSON (got: ${text.slice(0, 120)}...)`);
+  }
 }
 
 function renderNodeButtons(manifest) {
@@ -76,23 +123,25 @@ function setActiveButton(nodeId) {
   if (btn) btn.classList.add('active');
 }
 
-async function selectNode(nodeId) {
-  currentNode = nodeId;
-  setActiveButton(nodeId);
-  const data = await loadNodeData(nodeId);
-  document.getElementById('tailCaveat').classList.toggle('show', !!data.weak_tail_node);
+function drawChart() {
+  if (!currentData) return;
+  const allRows = [...currentData.rows].sort((a, b) => new Date(a.target_time) - new Date(b.target_time));
+  const rows = viewMode === '2h' ? allRows.filter(r => r.horizon_hours <= 2) : allRows;
 
-  const labels = data.rows.map(r => r.target_time);
-  const series = (key) => data.rows.map(r => r[key]);
+  const labels = rows.map(r => {
+    const he = heInfo(r.target_time);
+    return viewMode === '2h' ? he.label : `${he.label}\n${he.operatingDay.slice(5)}`;
+  });
+  const series = (key) => rows.map(r => r[key]);
 
   const datasets = [
-    { label: 'q95', data: series('q95'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'rgba(192,0,0,0.08)', fill: '+1', pointRadius: 0 },
-    { label: 'q90', data: series('q90'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'rgba(192,0,0,0.12)', fill: '+1', pointRadius: 0 },
-    { label: 'q75', data: series('q75'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'rgba(31,56,100,0.10)', fill: '+1', pointRadius: 0 },
-    { label: 'q50 (median)', data: series('q50'), borderColor: '#1f3864', backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2 },
-    { label: 'q25', data: series('q25'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: 0 },
-    { label: 'q10', data: series('q10'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'transparent', fill: false, pointRadius: 0 },
-    { label: 'q05', data: series('q05'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: 0 },
+    { label: 'q95', data: series('q95'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'rgba(192,0,0,0.08)', fill: '+1', pointRadius: viewMode === '2h' ? 3 : 0 },
+    { label: 'q90', data: series('q90'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'rgba(192,0,0,0.12)', fill: '+1', pointRadius: viewMode === '2h' ? 3 : 0 },
+    { label: 'q75', data: series('q75'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'rgba(31,56,100,0.10)', fill: '+1', pointRadius: viewMode === '2h' ? 3 : 0 },
+    { label: 'q50 (median)', data: series('q50'), borderColor: '#1f3864', backgroundColor: 'transparent', pointRadius: viewMode === '2h' ? 4 : 0, borderWidth: 2 },
+    { label: 'q25', data: series('q25'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: viewMode === '2h' ? 3 : 0 },
+    { label: 'q10', data: series('q10'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'transparent', fill: false, pointRadius: viewMode === '2h' ? 3 : 0 },
+    { label: 'q05', data: series('q05'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: viewMode === '2h' ? 3 : 0 },
   ];
 
   if (chart) chart.destroy();
@@ -103,16 +152,21 @@ async function selectNode(nodeId) {
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ticks: { maxTicksLimit: 12 } },
+        x: { ticks: { maxTicksLimit: viewMode === '2h' ? 9 : 12, autoSkip: viewMode !== '2h' } },
         y: { title: { display: true, text: '$/MWh' } },
       },
-      plugins: { legend: { position: 'bottom' } },
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: { callbacks: { label: (c) => `${c.dataset.label}: $${c.parsed.y.toFixed(2)}/MWh` } },
+      },
     },
   });
 
-  let metaStr = `Node: ${data.display_name} (${data.node_id}) -- origin time: ${data.origin_time} -- ${data.rows.length} target intervals`;
-  if (data.source_meta) {
-    const m = data.source_meta;
+  const firstHe = rows.length ? heInfo(rows[0].target_time) : null;
+  let metaStr = `Node: ${currentData.display_name} (${currentData.node_id}) -- origin: ${currentData.origin_time} -- ${rows.length} intervals`;
+  if (firstHe) metaStr += ` -- starting ${firstHe.label}, operating day ${firstHe.operatingDay} CT`;
+  if (currentData.source_meta) {
+    const m = currentData.source_meta;
     if (m.display_name) metaStr += ` -- source: ${m.display_name}`;
     if (m.horizon_hours) metaStr += ` -- forecast horizon: ${m.horizon_hours}h`;
     if (m.issue_cadence_minutes) metaStr += ` -- issued every ${m.issue_cadence_minutes}min`;
@@ -120,10 +174,41 @@ async function selectNode(nodeId) {
   document.getElementById('chartMeta').textContent = metaStr;
 }
 
+async function selectNode(nodeId) {
+  currentNode = nodeId;
+  setActiveButton(nodeId);
+  try {
+    currentData = await fetchJson(`data/${nodeId}_latest.json`);
+  } catch (e) {
+    showError(`Failed to load forecast data for ${nodeId}: ${e.message}`);
+    return;
+  }
+  document.getElementById('tailCaveat').classList.toggle('show', !!currentData.weak_tail_node);
+  drawChart();
+}
+
+document.getElementById('btn24h').onclick = () => {
+  viewMode = '24h';
+  document.getElementById('btn24h').classList.add('active');
+  document.getElementById('btn2h').classList.remove('active');
+  drawChart();
+};
+document.getElementById('btn2h').onclick = () => {
+  viewMode = '2h';
+  document.getElementById('btn2h').classList.add('active');
+  document.getElementById('btn24h').classList.remove('active');
+  drawChart();
+};
+
 (async function init() {
-  const manifest = await loadManifest();
+  let manifest;
+  try {
+    manifest = await fetchJson('data/manifest.json');
+  } catch (e) {
+    showError(`Failed to load manifest: ${e.message}`);
+    return;
+  }
   renderNodeButtons(manifest);
   const params = new URLSearchParams(location.search);
   const requested = params.get('node');
-  const match = manifest.find(n => n.node_id === requested);
-  if
+  const match =
