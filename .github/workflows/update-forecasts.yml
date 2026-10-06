@@ -1,0 +1,47 @@
+name: Update ATG Forecasts
+
+on:
+  schedule:
+    # Hourly, on the hour -- matches Metis 1's current issuance cadence.
+    # Tighten this if/when askthegrid ships 5-15min issuance.
+    - cron: "5 * * * *"
+  workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  pull-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull latest forecasts
+        env:
+          ASKTHEGRID_API_KEY: ${{ secrets.ASKTHEGRID_API_KEY }}
+        run: python orchestrator.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add data dashboard/data
+          git diff --cached --quiet || git commit -m "Update forecasts $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          git push
+
+      # If deploying to Cloudflare Pages via Git integration, this step isn't
+      # needed -- Pages will redeploy automatically on the push above. If you
+      # hit the same Cron Trigger / KV binding reversion issue noted on the
+      # ESR Utilization Worker, deploy with wrangler directly instead:
+      #
+      # - name: Deploy via wrangler
+      #   run: npx wrangler pages deploy dashboard --project-name=atg-forecast-dashboard
+      #   env:
+      #     CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

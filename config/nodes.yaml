@@ -1,0 +1,31 @@
+# HEN nodes with Metis 1 Preview API access enabled.
+# Add a new entry here as soon as James turns on another node --
+# nothing else in the pipeline needs to change.
+#
+# display_name: what shows up on the dashboard
+# node_id: askthegrid / ERCOT resource node ID
+# hen_asset: true if this is a live HEN asset (vs. a comp/eval-only node)
+
+nodes:
+  - display_name: "Fort Duncan"
+    node_id: FTDUNCAN_RN
+    hen_asset: true
+  - display_name: "Olney AGR"
+    node_id: OLNEYTN_RN
+    hen_asset: true
+  - display_name: "Junction"
+    node_id: JUNCTION_RN
+    hen_asset: false
+  - display_name: "Coyote Springs"
+    node_id: COYOTSPR_RN
+    hen_asset: false
+  - display_name: "Lonestar"
+    node_id: LONESTAR_RN
+    hen_asset: false
+
+# Nodes known to under-cover the upper tail (q90/q95) based on the Sep 2026
+# backtest -- see /areas/askthegrid-forecast-eval notes. The dashboard shows
+# a caveat banner for these specifically.
+weak_tail_nodes:
+  - JUNCTION_RN
+  - OLNEYTN_RN

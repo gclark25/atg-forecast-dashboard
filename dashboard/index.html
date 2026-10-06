@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ATG Metis 1 Forecast Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: #f5f6f8; color: #1f2937; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 20px; }
+  .node-select { margin-bottom: 16px; }
+  .node-select button {
+    padding: 6px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid #d1d5db;
+    background: #fff; cursor: pointer; font-size: 13px;
+  }
+  .node-select button.active { background: #1f3864; color: #fff; border-color: #1f3864; }
+  .card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px; }
+  .caveat {
+    background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
+    font-size: 13px; margin-bottom: 16px; display: none;
+  }
+  .caveat.show { display: block; }
+  .meta { font-size: 12px; color: #6b7280; margin-top: 8px; }
+  canvas { max-height: 420px; }
+</style>
+</head>
+<body>
+
+<h1>ATG Metis 1 Preview -- HEN Nodal Price Forecasts</h1>
+<div class="subtitle">Current quantile forecast (q05-q95) by node. Refreshed on the ingestion schedule -- see "origin time" below the chart.</div>
+
+<div class="node-select" id="nodeSelect"></div>
+
+<div class="caveat" id="tailCaveat">
+  <strong>Known limitation at this node:</strong> the q90/q95 band under-covered actual prices in backtesting,
+  worst in high-price months (Sep 2026 live evening scarcity spikes went well past p90 and stayed elevated after
+  recovery). Treat the shaded outer band as a floor on risk, not a ceiling -- don't size scarcity-event exposure
+  off it directly.
+</div>
+
+<div class="card">
+  <canvas id="forecastChart"></canvas>
+  <div class="meta" id="chartMeta"></div>
+</div>
+
+<script>
+let currentNode = null;
+let chart = null;
+
+async function loadManifest() {
+  const res = await fetch('data/manifest.json?_=' + Date.now());
+  return res.json();
+}
+
+async function loadNodeData(nodeId) {
+  const res = await fetch(`data/${nodeId}_latest.json?_=` + Date.now());
+  return res.json();
+}
+
+function renderNodeButtons(manifest) {
+  const container = document.getElementById('nodeSelect');
+  container.innerHTML = '';
+  manifest.forEach(n => {
+    const btn = document.createElement('button');
+    btn.textContent = n.display_name;
+    btn.onclick = () => selectNode(n.node_id);
+    btn.id = `btn-${n.node_id}`;
+    container.appendChild(btn);
+  });
+}
+
+function setActiveButton(nodeId) {
+  document.querySelectorAll('.node-select button').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(`btn-${nodeId}`);
+  if (btn) btn.classList.add('active');
+}
+
+async function selectNode(nodeId) {
+  currentNode = nodeId;
+  setActiveButton(nodeId);
+  const data = await loadNodeData(nodeId);
+  document.getElementById('tailCaveat').classList.toggle('show', !!data.weak_tail_node);
+
+  const labels = data.rows.map(r => r.target_time);
+  const series = (key) => data.rows.map(r => r[key]);
+
+  const datasets = [
+    { label: 'q95', data: series('q95'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'rgba(192,0,0,0.08)', fill: '+1', pointRadius: 0 },
+    { label: 'q90', data: series('q90'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'rgba(192,0,0,0.12)', fill: '+1', pointRadius: 0 },
+    { label: 'q75', data: series('q75'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'rgba(31,56,100,0.10)', fill: '+1', pointRadius: 0 },
+    { label: 'q50 (median)', data: series('q50'), borderColor: '#1f3864', backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2 },
+    { label: 'q25', data: series('q25'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: 0 },
+    { label: 'q10', data: series('q10'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'transparent', fill: false, pointRadius: 0 },
+    { label: 'q05', data: series('q05'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: 0 },
+  ];
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('forecastChart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { maxTicksLimit: 12 } },
+        y: { title: { display: true, text: '$/MWh' } },
+      },
+      plugins: { legend: { position: 'bottom' } },
+    },
+  });
+
+  document.getElementById('chartMeta').textContent =
+    `Node: ${data.display_name} (${data.node_id}) -- origin time: ${data.origin_time} -- ${data.rows.length} target intervals`;
+}
+
+(async function init() {
+  const manifest = await loadManifest();
+  renderNodeButtons(manifest);
+  if (manifest.length) await selectNode(manifest[0].node_id);
+})();
+</script>
+</body>
+</html>
