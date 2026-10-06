@@ -1,6 +1,23 @@
 name = "atg-forecast-dashboard"
 compatibility_date = "2026-10-06"
 workers_dev = true
+main = "worker.js"
+
+# Replaces the GitHub Actions cron (best-effort, prone to multi-hour delays
+# under load -- see /areas/askthegrid-forecast-eval notes). This runs on
+# Cloudflare's own scheduler instead of competing for GitHub's shared runner
+# queue. Same cadence as before, matching Metis 1's confirmed 15min issuance.
+[triggers]
+crons = ["5,20,35,50 * * * *"]
 
 [assets]
 directory = "dashboard"
+# Without this, requests to /data/* would be served as static files (there
+# aren't any anymore -- the Worker now serves this data out of KV). This
+# routes those paths to the Worker's fetch() handler first; everything else
+# (index.html, fleet.html, theme.js) still falls through to ASSETS unchanged.
+run_worker_first = ["/data/*"]
+
+[[kv_namespaces]]
+binding = "FORECASTS_KV"
+id = "4039b25afa8140269a13d17e060624c6"

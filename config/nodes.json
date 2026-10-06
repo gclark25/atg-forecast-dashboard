@@ -1,0 +1,168 @@
+{
+  "nodes": [
+    {
+      "display_name": "Fort Duncan",
+      "node_id": "FTDUNCAN_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Olney",
+      "node_id": "OLNEYTN_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Junction (Schreiner)",
+      "node_id": "JUNCTION_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Coyote Springs",
+      "node_id": "COYOTSPR_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Lonestar",
+      "node_id": "LONESTAR_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Cherry Creek",
+      "node_id": "TOYAH_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Saddleback",
+      "node_id": "SADLBACK_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Faulkner",
+      "node_id": "FAULKNER_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Catarina (La Huerta)",
+      "node_id": "CATARINA_B1",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Holcomb (Burro)",
+      "node_id": "HOLCOMB_RN1",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Rattlesnake",
+      "node_id": "RTLSNAKE_BT",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Cedarvale",
+      "node_id": "CEDRVALE_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Screwbean",
+      "node_id": "SBEAN_BESS",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Gomez",
+      "node_id": "GOMEZ_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Dibol",
+      "node_id": "DIBOL_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Val Verde",
+      "node_id": "MV_VALV4_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Hamilton (Alma)",
+      "node_id": "HAMI_BESS_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Weil Tract (Elote)",
+      "node_id": "WLTC_ESR_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Mainland",
+      "node_id": "MAINLAND_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Mineral Wells East",
+      "node_id": "MNWL_BESS_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Garden City East",
+      "node_id": "GRDNE_ESR_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Farmersville",
+      "node_id": "FRMRSVLW_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Lufkin South",
+      "node_id": "LFSTH_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Judkins",
+      "node_id": "JDKNS_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Pauline",
+      "node_id": "PAULN_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Cisco (Red Gap)",
+      "node_id": "CISC_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Falfurrias (Duarte)",
+      "node_id": "FALFUR_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Russek St",
+      "node_id": "RUSSEKST_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Pavlov (Canine)",
+      "node_id": "PAVLOV_BT_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Poteet",
+      "node_id": "POTEETS_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Tynan",
+      "node_id": "TYNAN_RN",
+      "hen_asset": true
+    },
+    {
+      "display_name": "Sandlake",
+      "node_id": "SANDLAKE_RN",
+      "hen_asset": true
+    }
+  ],
+  "weak_tail_nodes": [
+    "JUNCTION_RN",
+    "OLNEYTN_RN"
+  ]
+}

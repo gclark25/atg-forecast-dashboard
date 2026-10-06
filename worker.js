@@ -1,0 +1,203 @@
+/**
+ * Cloudflare Worker replacing the GitHub Actions pull-and-publish pipeline.
+ *
+ * Why: GitHub's scheduled (cron) triggers are explicitly documented as
+ * best-effort, not guaranteed -- delays of 30+ minutes under load are normal,
+ * and runs can be dropped entirely. A Cloudflare Cron Trigger runs on the
+ * same platform already serving this dashboard, without competing for
+ * GitHub's shared runner queue.
+ *
+ * - scheduled(): runs on the cron below. Pulls the latest forecast for every
+ *   configured node from askthegrid's API and writes it to KV.
+ * - fetch(): serves data/manifest.json, data/<node>_latest.json, and
+ *   data/run_status.json out of KV; everything else (index.html, fleet.html,
+ *   theme.js) falls through to the static ASSETS binding unchanged.
+ *
+ * Deliberately NOT ported from the old Python pipeline: the vintage-keyed
+ * forecast_log.jsonl history used for the future live-accuracy-scorecard
+ * work. That was never wired into the schedule in the first place -- if/when
+ * that work resumes, it needs its own KV (or R2) design, not a straight port.
+ */
+
+import nodesConfig from './config/nodes.json';
+
+const BASE_URL = 'https://askthegrid.com';
+const FORECAST_PATH = '/api/v1/grid/forecasts';
+const SOURCE_MATCH = 'metis'; // confirmed correct against a live pull, 2026-10-06
+
+const QUANTILE_LEVELS = { q05: 0.05, q10: 0.10, q25: 0.25, q50: 0.50, q75: 0.75, q90: 0.90, q95: 0.95 };
+const TOP_LEVEL_FIELD = { 0.10: 'p10', 0.50: 'p50', 0.90: 'p90' };
+
+async function fetchWithRetry(url, headers, maxRetries = 5) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const res = await fetch(url, { headers });
+    if (res.status === 200) return res.json();
+    if ([429, 500, 502, 503, 504].includes(res.status)) {
+      await new Promise((r) => setTimeout(r, 2 ** attempt * 1000));
+      continue;
+    }
+    throw new Error(`askthegrid API error ${res.status}: ${(await res.text()).slice(0, 500)}`);
+  }
+  throw new Error(`askthegrid API: exhausted retries on ${url}`);
+}
+
+async function getLatestForecast(nodeId, apiKey, horizonHours = 48) {
+  const now = new Date();
+  const to = new Date(now.getTime() + horizonHours * 3600 * 1000);
+  const params = new URLSearchParams({
+    iso: 'ERCOT', targetKind: 'node', targetId: nodeId,
+    from: now.toISOString(), to: to.toISOString(), detail: 'levels',
+  });
+  return fetchWithRetry(`${BASE_URL}${FORECAST_PATH}?${params}`, {
+    Authorization: `Bearer ${apiKey}`,
+    Accept: 'application/json',
+  });
+}
+
+function selectMetisSeries(raw) {
+  const series = raw.series || [];
+  for (const s of series) {
+    const src = s.source || {};
+    const name = ['id', 'shortName', 'displayName', 'modelId'].map((k) => String(src[k] || '')).join(' ').toLowerCase();
+    if (name.includes(SOURCE_MATCH)) return s;
+  }
+  return series.length ? series[0] : null;
+}
+
+function extractQuantile(point, level) {
+  if (TOP_LEVEL_FIELD[level]) return point[TOP_LEVEL_FIELD[level]];
+  const levels = point.levels || {};
+  for (const key of [String(level), level.toFixed(2), String(Math.round(level * 100)), `p${String(Math.round(level * 100)).padStart(2, '0')}`]) {
+    if (key in levels) return levels[key];
+  }
+  return null;
+}
+
+function parseForecastResponse(raw, nodeId) {
+  const series = selectMetisSeries(raw);
+  if (!series) return [];
+  const issuedAt = series.issuedAt;
+  const issuedMs = issuedAt ? new Date(issuedAt).getTime() : null;
+
+  return (series.points || []).map((p) => {
+    const ts = p.ts;
+    const horizonHours = issuedMs && ts ? (new Date(ts).getTime() - issuedMs) / 3600000 : null;
+    const row = {
+      node_id: nodeId,
+      origin_time: issuedAt,
+      target_time: ts,
+      horizon_hours: horizonHours,
+      pulled_at: new Date().toISOString(),
+      truth: p.actual ?? null,
+    };
+    for (const [qcol, qlev] of Object.entries(QUANTILE_LEVELS)) {
+      row[qcol] = extractQuantile(p, qlev);
+    }
+    return row;
+  });
+}
+
+function extractSeriesMeta(raw) {
+  const series = selectMetisSeries(raw);
+  if (!series) return null;
+  const src = series.source || {};
+  return {
+    display_name: src.displayName ?? null,
+    model_id: src.modelId ?? null,
+    horizon_hours: src.horizonHours ?? null,
+    issue_cadence_minutes: src.issueCadenceMinutes ?? null,
+    resolution_minutes: src.resolutionMinutes ?? null,
+  };
+}
+
+async function pullAndStore(env) {
+  const nodes = nodesConfig.nodes;
+  const weakTail = new Set(nodesConfig.weak_tail_nodes || []);
+  const apiKey = env.ASKTHEGRID_API_KEY;
+
+  // nodes.map(async ...) + Promise.all preserves the INPUT order in the
+  // resolved array, regardless of which fetch actually finishes first --
+  // critical here, since index.html's node button list just iterates
+  // whatever order manifest.json arrives in. Pushing to a shared array as
+  // each promise resolved (the first version of this) would have made that
+  // list reshuffle unpredictably between pulls; returning from the mapped
+  // function instead keeps it stable and matching config/nodes.json's order.
+  const manifest = await Promise.all(nodes.map(async (node) => {
+    const nodeId = node.node_id;
+    try {
+      const raw = await getLatestForecast(nodeId, apiKey);
+      const rows = parseForecastResponse(raw, nodeId);
+      const meta = extractSeriesMeta(raw);
+
+      if (rows.length) {
+        const latestOrigin = rows.reduce((max, r) => (r.origin_time > max ? r.origin_time : max), rows[0].origin_time);
+        const snapshotRows = rows
+          .filter((r) => r.origin_time === latestOrigin)
+          .sort((a, b) => (a.target_time < b.target_time ? -1 : 1));
+
+        await env.FORECASTS_KV.put(`latest:${nodeId}`, JSON.stringify({
+          node_id: nodeId,
+          display_name: node.display_name,
+          origin_time: latestOrigin,
+          weak_tail_node: weakTail.has(nodeId),
+          source_meta: meta,
+          rows: snapshotRows,
+        }));
+      }
+
+      return {
+        node_id: nodeId,
+        display_name: node.display_name,
+        weak_tail_node: weakTail.has(nodeId),
+        rows_pulled: rows.length,
+        new_rows: rows.length, // vintage-dedup history not ported in this migration
+      };
+    } catch (e) {
+      return {
+        node_id: nodeId,
+        display_name: node.display_name,
+        weak_tail_node: weakTail.has(nodeId),
+        rows_pulled: 0,
+        new_rows: 0,
+        error: String(e.message || e),
+      };
+    }
+  }));
+
+  await env.FORECASTS_KV.put('manifest', JSON.stringify(manifest));
+  await env.FORECASTS_KV.put('run_status', JSON.stringify({ generated_at: new Date().toISOString() }));
+}
+
+const KV_ROUTES = {
+  '/data/manifest.json': 'manifest',
+  '/data/run_status.json': 'run_status',
+};
+
+function kvKeyForPath(pathname) {
+  if (KV_ROUTES[pathname]) return KV_ROUTES[pathname];
+  const m = pathname.match(/^\/data\/([A-Za-z0-9_]+)_latest\.json$/);
+  return m ? `latest:${m[1]}` : null;
+}
+
+export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(pullAndStore(env));
+  },
+
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const kvKey = kvKeyForPath(url.pathname);
+
+    if (kvKey) {
+      const value = await env.FORECASTS_KV.get(kvKey);
+      if (value === null) {
+        return new Response(`Not found: ${kvKey}`, { status: 404 });
+      }
+      return new Response(value, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      });
+    }
+
+    return env.ASSETS.fetch(request);
+  },
+};
