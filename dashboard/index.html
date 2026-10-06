@@ -117,6 +117,16 @@ function heInfo(iso) {
 function heShort(info) {
   return info.quarter === 0 ? `HE${info.he}` : `HE${info.he}:${String(info.quarter * 15).padStart(2, '0')}`;
 }
+// Real CT clock time, used anywhere we describe a specific instant (tooltip,
+// footer). Axis labels keep heShort()'s HE format on purpose -- that's the
+// operational framework; this is for "what time is this, in plain terms."
+function formatCtDateTime(iso) {
+  const d = new Date(iso);
+  const ctStr = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(d);
+  return `${ctStr} CT`;
+}
 
 function showError(msg) {
   const box = document.getElementById('errorBox');
@@ -200,7 +210,21 @@ function chartPalette() {
 function drawChart() {
   if (!currentData) return;
   const allRows = [...currentData.rows].sort((a, b) => new Date(a.target_time) - new Date(b.target_time));
-  const rows = viewMode === '2h' ? allRows.filter(r => r.horizon_hours <= 2) : allRows;
+  // Filtered by actual current time, not by the forecast's own horizon_hours
+  // field -- that field is fixed relative to when the pull happened, so if
+  // the data is stale (or the first point just doesn't land on a clean hour),
+  // "next 2 hours" would silently mean "whatever's left of a 2h budget from
+  // an old origin," not a real rolling window. Falls back to the nearest
+  // available future points if the window itself is empty (very stale pull).
+  let rows = allRows;
+  if (viewMode === '2h') {
+    const now = Date.now();
+    const windowRows = allRows.filter(r => {
+      const t = new Date(r.target_time).getTime();
+      return t >= now && t <= now + 2 * 3600 * 1000;
+    });
+    rows = windowRows.length ? windowRows : allRows.filter(r => new Date(r.target_time).getTime() >= now).slice(0, 8);
+  }
 
   // 24h view: label only on-the-hour points (declutters 94 points down to
   // ~23 ticks); 2h view: label every point since there are only ~8.
@@ -244,13 +268,7 @@ function drawChart() {
         legend: { position: 'bottom', labels: { color: pal.tick } },
         tooltip: {
           callbacks: {
-            title: (items) => {
-              const d = new Date(rows[items[0].dataIndex].target_time);
-              const ctStr = new Intl.DateTimeFormat('en-US', {
-                timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
-              }).format(d);
-              return `${ctStr} CT`;
-            },
+            title: (items) => formatCtDateTime(rows[items[0].dataIndex].target_time),
             label: (c) => `${c.dataset.label}: $${c.parsed.y.toFixed(2)}/MWh`,
           },
         },
@@ -258,15 +276,14 @@ function drawChart() {
     },
   });
 
-  const firstInfo = rows.length ? heInfo(rows[0].target_time) : null;
   let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} intervals`;
-  if (firstInfo) metaStr += ` starting ${heShort(firstInfo)}, operating day ${firstInfo.operatingDay} (Central Time)`;
+  if (rows.length) metaStr += ` starting ${formatCtDateTime(rows[0].target_time)}`;
   if (currentData.source_meta) {
     const m = currentData.source_meta;
     if (m.horizon_hours) metaStr += ` -- forecast horizon ${m.horizon_hours}h`;
     if (m.issue_cadence_minutes) metaStr += `, issued every ${m.issue_cadence_minutes}min`;
   }
-  metaStr += ` -- pull issued ${currentData.origin_time} UTC`;
+  metaStr += ` -- pull issued ${formatCtDateTime(currentData.origin_time)}`;
   document.getElementById('chartMeta').textContent = metaStr;
 }
 
