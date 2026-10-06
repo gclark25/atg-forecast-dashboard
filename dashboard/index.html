@@ -2,81 +2,66 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>ATG Fleet Overview</title>
+<title>ATG Metis 1 Forecast Dashboard</title>
 <script src="theme.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root {
     --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
     --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
-    --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
-    --cell-empty: #eee; --tooltip-bg: #1f3864;
+    --accent2: #0f6e56; --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
   }
   html[data-theme="dark"] {
     --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
     --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
-    --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
-    --cell-empty: #2a2f3a; --tooltip-bg: #374151;
+    --accent2: #2dd4bf; --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
   }
   body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
   h1 { font-size: 20px; margin-bottom: 4px; }
   .topbar { display: flex; justify-content: space-between; align-items: flex-start; }
-  .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
   .theme-toggle {
     padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
   .last-updated { font-size: 12px; color: var(--text-secondary); margin-top: 6px; text-align: right; }
   .last-updated.stale { color: var(--caveat-border); font-weight: 500; }
-  a.backlink { font-size: 13px; color: var(--accent); text-decoration: none; }
-  .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
-  .controls button {
-    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+  .node-select { margin-bottom: 16px; }
+  .node-select button {
+    padding: 6px 14px; margin-right: 8px; margin-bottom: 6px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
-  .controls button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); margin-left: auto; }
-  .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #E6F1FB, #378ADD, #042C53); }
-  .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); overflow-x: auto; }
+  .node-select button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .view-toggle { margin-bottom: 16px; }
+  .view-toggle button {
+    padding: 6px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
+  }
+  .view-toggle button.active { background: var(--accent2); color: var(--accent-text); border-color: var(--accent2); }
+  .card { background: var(--card); border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); margin-bottom: 16px; }
+  .caveat {
+    background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; display: none;
+  }
+  .caveat.show { display: block; }
   .error-box {
     background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
     padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; display: none;
     font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
-  /* table-layout:fixed + no width:100% so the browser doesn't dump all
-     leftover space into the one column without an explicit width (the
-     label column) -- that was the cause of the big gap before the grid. */
-  /* Column widths come from the <colgroup> rendered in JS (one fixed-px
-     label column + N equal calc() shares for the rest) -- that's what
-     stretches the table to fill the card instead of leaving blank space
-     after the last column. table-layout:fixed is required for <col>
-     widths to actually govern cell sizing rather than being a hint. */
-  table.heat { border-collapse: collapse; font-size: 11px; table-layout: fixed; width: 100%; }
-  table.heat th {
-    font-weight: 500; color: var(--text-secondary); padding: 2px 4px; text-align: center;
-    white-space: pre-line;
-  }
-  table.heat td.node-label {
-    text-align: left; padding: 3px 10px 3px 4px; white-space: nowrap; overflow: hidden;
-    text-overflow: ellipsis; font-size: 12px; cursor: pointer; position: sticky; left: 0; background: var(--card);
-  }
-  table.heat td.node-label:hover { text-decoration: underline; color: var(--accent); }
-  table.heat td.cell { height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
-  .weak-tail-flag { color: var(--caveat-border); font-size: 11px; margin-left: 4px; }
-  .loading { color: var(--text-secondary); font-size: 13px; padding: 20px; }
-  .tooltip {
-    position: fixed; background: var(--tooltip-bg); color: #fff; font-size: 12px; padding: 4px 8px;
-    border-radius: 4px; pointer-events: none; display: none; z-index: 10;
-  }
+  .meta { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+  canvas { max-height: 420px; }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
 
 <div class="topbar">
   <div>
-    <a class="backlink" href="index.html">&larr; Back to node detail view</a>
-    <h1>ATG Fleet Overview</h1>
-    <div class="subtitle" id="subtitle">Loading fleet data...</div>
+    <a href="fleet.html" style="font-size: 13px; text-decoration: none;">&larr; Fleet overview (all nodes)</a>
+    <h1>ATG Metis 1 Preview -- HEN Nodal Price Forecasts</h1>
+    <div class="subtitle">Quantile forecast (q05-q95) by node, in ERCOT Hour-Ending (HE), Central Time.</div>
   </div>
   <div>
     <button class="theme-toggle" id="themeToggle">Dark mode</button>
@@ -86,22 +71,30 @@
 
 <div class="error-box" id="errorBox"></div>
 
-<div class="controls">
-  <button id="btnMedian" class="active">Median (q50)</button>
-  <button id="btnTail">Tail risk (q95)</button>
-  <div class="legend">Low <div class="legend-bar"></div> High ($/MWh, scaled per column set)</div>
+<div class="node-select" id="nodeSelect"></div>
+
+<div class="caveat" id="tailCaveat">
+  <strong>Known limitation at this node:</strong> the q90/q95 band under-covered actual prices in backtesting,
+  worst in high-price months (Sep 2026 live evening scarcity spikes went well past p90 and stayed elevated after
+  recovery). Treat the shaded outer band as a floor on risk, not a ceiling -- don't size scarcity-event exposure
+  off it directly.
+</div>
+
+<div class="view-toggle">
+  <button id="btn24h" class="active">24-hour horizon</button>
+  <button id="btn2h">Next 2 hours (15min)</button>
 </div>
 
 <div class="card">
-  <div id="heatContainer" class="loading">Loading...</div>
+  <canvas id="forecastChart"></canvas>
+  <div class="meta" id="chartMeta"></div>
 </div>
 
-<div class="tooltip" id="tooltip"></div>
-
 <script>
-let metric = 'q50';
-let fleetData = []; // [{node_id, display_name, weak_tail_node, byHe: Map(heKey -> {q50,q95,operatingDay,he})}]
-let heColumns = []; // ordered list of {key, label}
+let currentNode = null;
+let chart = null;
+let currentData = null;
+let viewMode = '24h';
 
 // ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
 function ctParts(iso) {
@@ -117,10 +110,22 @@ function ctParts(iso) {
 }
 function heInfo(iso) {
   const { date, hour, minute } = ctParts(iso);
-  const he = hour + 1;
-  const quarter = Math.floor(minute / 15);
-  const key = `${date}-HE${he}`;
-  return { operatingDay: date, he, quarter, key };
+  const he = hour + 1; // ERCOT Hour Ending: HE1 = 00:00-01:00 CT ... HE24 = 23:00-24:00 CT
+  const quarter = Math.floor(minute / 15); // 0=:00, 1=:15, 2=:30, 3=:45
+  return { operatingDay: date, he, quarter };
+}
+function heShort(info) {
+  return info.quarter === 0 ? `HE${info.he}` : `HE${info.he}:${String(info.quarter * 15).padStart(2, '0')}`;
+}
+// Real CT clock time, used anywhere we describe a specific instant (tooltip,
+// footer). Axis labels keep heShort()'s HE format on purpose -- that's the
+// operational framework; this is for "what time is this, in plain terms."
+function formatCtDateTime(iso) {
+  const d = new Date(iso);
+  const ctStr = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(d);
+  return `${ctStr} CT`;
 }
 
 function showError(msg) {
@@ -167,165 +172,178 @@ async function loadLastUpdated() {
   renderLastUpdated();
 }
 
-async function loadFleet() {
-  let manifest;
-  try {
-    manifest = await fetchJson('data/manifest.json');
-  } catch (e) {
-    showError(`Failed to load manifest: ${e.message}`);
-    document.getElementById('heatContainer').textContent = '';
-    return;
-  }
+function renderNodeButtons(manifest) {
+  const container = document.getElementById('nodeSelect');
+  container.innerHTML = '';
+  manifest.forEach(n => {
+    const btn = document.createElement('button');
+    btn.textContent = n.display_name;
+    btn.onclick = () => selectNode(n.node_id);
+    btn.id = `btn-${n.node_id}`;
+    container.appendChild(btn);
+  });
+}
 
-  const results = await Promise.all(manifest.map(async (m) => {
-    try {
-      const data = await fetchJson(`data/${m.node_id}_latest.json`);
-      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: data.rows || [] };
-    } catch (e) {
-      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: [], loadError: e.message };
-    }
-  }));
+function setActiveButton(nodeId) {
+  document.querySelectorAll('.node-select button').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(`btn-${nodeId}`);
+  if (btn) btn.classList.add('active');
+}
 
-  const failed = results.filter(r => r.loadError);
-  if (failed.length) {
-    showError(`${failed.length} node(s) failed to load: ${failed.map(f => f.node_id).join(', ')}`);
-  }
-
-  // Group every row by its own real HE bucket (Central Time), not by
-  // horizon-hours-from-origin -- nodes don't share an origin minute, but
-  // "HE18 on Oct 6" means the same thing for every node.
-  const allKeys = new Set();
-  const withBuckets = results.map((n) => {
-    const byHe = new Map();
-    for (const r of n.rows) {
-      const info = heInfo(r.target_time);
-      if (!byHe.has(info.key)) {
-        byHe.set(info.key, { q50: r.q50, q95: r.q95, operatingDay: info.operatingDay, he: info.he });
-        allKeys.add(info.key);
+function chartPalette() {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  return dark
+    ? {
+        q95: 'rgba(240,120,120,0.45)', q95fill: 'rgba(240,120,120,0.12)',
+        q90: 'rgba(240,120,120,0.65)', q90fill: 'rgba(240,120,120,0.18)',
+        q75: 'rgba(120,150,230,0.45)', q75fill: 'rgba(120,150,230,0.15)',
+        q50: '#8fb3ff', grid: 'rgba(255,255,255,0.08)', tick: '#9ca3af',
       }
-    }
-    return { ...n, byHe };
-  }).filter(n => n.byHe.size > 0);
+    : {
+        q95: 'rgba(192,0,0,0.3)', q95fill: 'rgba(192,0,0,0.08)',
+        q90: 'rgba(192,0,0,0.5)', q90fill: 'rgba(192,0,0,0.12)',
+        q75: 'rgba(31,56,100,0.3)', q75fill: 'rgba(31,56,100,0.10)',
+        q50: '#1f3864', grid: 'rgba(0,0,0,0.06)', tick: '#6b7280',
+      };
+}
 
-  // Column label shows the day only when it changes across the sorted
-  // column sequence, same decluttering as the detail chart's x-axis.
-  // Plain string sort breaks once HE hits double digits (e.g. "HE10" sorts
-  // before "HE2" alphabetically) -- sort by date, then by the HE number
-  // parsed as an integer, so the columns actually run in chronological order.
-  const sortedKeys = [...allKeys].sort((a, b) => {
-    const dayA = a.slice(0, 10), dayB = b.slice(0, 10);
-    if (dayA !== dayB) return dayA < dayB ? -1 : 1;
-    return parseInt(a.slice(13), 10) - parseInt(b.slice(13), 10);
-  });
+function drawChart() {
+  if (!currentData) return;
+  const allRows = [...currentData.rows].sort((a, b) => new Date(a.target_time) - new Date(b.target_time));
+  // Filtered by actual current time, not by the forecast's own horizon_hours
+  // field -- that field is fixed relative to when the pull happened, so if
+  // the data is stale (or the first point just doesn't land on a clean hour),
+  // "next 2 hours" would silently mean "whatever's left of a 2h budget from
+  // an old origin," not a real rolling window. Falls back to the nearest
+  // available future points if the window itself is empty (very stale pull).
+  let rows = allRows;
+  if (viewMode === '2h') {
+    const now = Date.now();
+    const windowRows = allRows.filter(r => {
+      const t = new Date(r.target_time).getTime();
+      return t >= now && t <= now + 2 * 3600 * 1000;
+    });
+    rows = windowRows.length ? windowRows : allRows.filter(r => new Date(r.target_time).getTime() >= now).slice(0, 8);
+  }
+
+  // 24h view: label only on-the-hour points (declutters 94 points down to
+  // ~23 ticks); 2h view: label every point since there are only ~8.
   let prevDay = null;
-  heColumns = sortedKeys.map(key => {
-    const [day, heStr] = [key.slice(0, 10), key.slice(11)];
-    const showDay = day !== prevDay;
-    if (showDay) prevDay = day;
-    return { key, label: showDay ? `${heStr}\n${day.slice(5)}` : heStr };
+  const labels = rows.map(r => {
+    const info = heInfo(r.target_time);
+    if (viewMode === '24h' && info.quarter !== 0) return '';
+    // 2h view matches the tooltip's plain-time convention (no HE prefix);
+    // 24h view keeps HE labels -- that's the operational framework for
+    // the wider horizon.
+    const mainLabel = viewMode === '2h'
+      ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(r.target_time))
+      : heShort(info);
+    const lines = [mainLabel];
+    if (info.operatingDay !== prevDay) { lines.push(info.operatingDay.slice(5)); prevDay = info.operatingDay; }
+    return lines;
+  });
+  const series = (key) => rows.map(r => r[key]);
+  const pal = chartPalette();
+  const pr = viewMode === '2h' ? 3 : 0;
+
+  const datasets = [
+    { label: 'q95', data: series('q95'), borderColor: pal.q95, backgroundColor: pal.q95fill, fill: '+1', pointRadius: pr },
+    { label: 'q90', data: series('q90'), borderColor: pal.q90, backgroundColor: pal.q90fill, fill: '+1', pointRadius: pr },
+    { label: 'q75', data: series('q75'), borderColor: pal.q75, backgroundColor: pal.q75fill, fill: '+1', pointRadius: pr },
+    { label: 'q50 (median)', data: series('q50'), borderColor: pal.q50, backgroundColor: 'transparent', pointRadius: viewMode === '2h' ? 4 : 0, borderWidth: 2 },
+    { label: 'q25', data: series('q25'), borderColor: pal.q75, backgroundColor: 'transparent', fill: false, pointRadius: pr },
+    { label: 'q10', data: series('q10'), borderColor: pal.q90, backgroundColor: 'transparent', fill: false, pointRadius: pr },
+    { label: 'q05', data: series('q05'), borderColor: pal.q95, backgroundColor: 'transparent', fill: false, pointRadius: pr },
+  ];
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('forecastChart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          ticks: { autoSkip: true, maxTicksLimit: viewMode === '2h' ? 9 : 24, color: pal.tick },
+          grid: { color: pal.grid },
+        },
+        y: { title: { display: true, text: '$/MWh', color: pal.tick }, ticks: { color: pal.tick }, grid: { color: pal.grid } },
+      },
+      plugins: {
+        legend: { position: 'bottom', labels: { color: pal.tick } },
+        tooltip: {
+          callbacks: {
+            title: (items) => formatCtDateTime(rows[items[0].dataIndex].target_time),
+            label: (c) => `${c.dataset.label}: $${c.parsed.y.toFixed(2)}/MWh`,
+          },
+        },
+      },
+    },
   });
 
-  fleetData = withBuckets;
-
-  document.getElementById('subtitle').textContent =
-    `${fleetData.length} nodes with live data -- columns are real ERCOT Hour-Ending intervals, Central Time`;
-
-  render();
+  let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} intervals`;
+  if (rows.length) metaStr += ` starting ${formatCtDateTime(rows[0].target_time)}`;
+  if (currentData.source_meta) {
+    const m = currentData.source_meta;
+    if (m.horizon_hours) metaStr += ` -- forecast horizon ${m.horizon_hours}h`;
+    if (m.issue_cadence_minutes) metaStr += `, issued every ${m.issue_cadence_minutes}min`;
+  }
+  metaStr += ` -- pull issued ${formatCtDateTime(currentData.origin_time)}`;
+  document.getElementById('chartMeta').textContent = metaStr;
 }
 
-function colorFor(value, min, max) {
-  if (value === null || value === undefined) return 'var(--cell-empty)';
-  const t = max > min ? (value - min) / (max - min) : 0;
-  const stops = [
-    [230, 241, 251], [181, 212, 244], [133, 183, 235],
-    [55, 138, 221], [24, 95, 165], [12, 68, 124], [4, 44, 83],
-  ];
-  const idx = Math.min(stops.length - 2, Math.floor(t * (stops.length - 1)));
-  const frac = t * (stops.length - 1) - idx;
-  const c = stops[idx].map((v, i) => Math.round(v + (stops[idx + 1][i] - v) * frac));
-  return `rgb(${c[0]},${c[1]},${c[2]})`;
-}
-
-function textColorFor(value, min, max) {
-  const t = max > min ? (value - min) / (max - min) : 0;
-  return t > 0.55 ? '#fff' : '#1f2937';
-}
-
-function render() {
-  if (!heColumns.length) {
-    document.getElementById('heatContainer').textContent = 'No data to display.';
+async function selectNode(nodeId) {
+  currentNode = nodeId;
+  setActiveButton(nodeId);
+  try {
+    currentData = await fetchJson(`data/${nodeId}_latest.json`);
+  } catch (e) {
+    showError(`Failed to load forecast data for ${nodeId}: ${e.message}`);
     return;
   }
-
-  const allVals = fleetData.flatMap(n => [...n.byHe.values()].map(h => h[metric]));
-  const min = Math.min(...allVals);
-  const max = Math.max(...allVals);
-
-  const sorted = [...fleetData].sort((a, b) => {
-    const peakA = Math.max(...[...a.byHe.values()].map(h => h[metric]));
-    const peakB = Math.max(...[...b.byHe.values()].map(h => h[metric]));
-    return peakB - peakA;
-  });
-
-  const labelColWidth = '150px';
-  let html = '<table class="heat"><colgroup>';
-  html += `<col style="width:${labelColWidth}">`;
-  for (let i = 0; i < heColumns.length; i++) {
-    html += `<col style="width:calc((100% - ${labelColWidth}) / ${heColumns.length})">`;
-  }
-  html += '</colgroup><tr><th></th>';
-  for (const col of heColumns) html += `<th>${col.label}</th>`;
-  html += '</tr>';
-
-  for (const n of sorted) {
-    html += `<tr><td class="node-label" title="${n.display_name}" onclick="location.href='index.html?node=${n.node_id}'">${n.display_name}`;
-    if (n.weak_tail_node) html += `<span class="weak-tail-flag" title="Known weak tail calibration (q90/q95 under-covers actual prices)">&#9888;</span>`;
-    html += `</td>`;
-    for (const col of heColumns) {
-      const cell = n.byHe.get(col.key);
-      const val = cell ? cell[metric] : null;
-      const bg = colorFor(val, min, max);
-      const fg = val !== null ? textColorFor(val, min, max) : 'var(--text-secondary)';
-      const label = val !== null ? `${n.display_name} ${col.label.replace('\n', ' ')}: $${val.toFixed(0)}/MWh` : 'no data';
-      html += `<td class="cell" style="background:${bg};color:${fg}" onmousemove="showTip(event,'${label}')" onmouseleave="hideTip()" onclick="location.href='index.html?node=${n.node_id}'">${val !== null ? Math.round(val) : ''}</td>`;
-    }
-    html += '</tr>';
-  }
-  html += '</table>';
-  document.getElementById('heatContainer').innerHTML = html;
+  document.getElementById('tailCaveat').classList.toggle('show', !!currentData.weak_tail_node);
+  drawChart();
 }
 
-function showTip(e, text) {
-  const t = document.getElementById('tooltip');
-  t.textContent = text;
-  t.style.left = (e.clientX + 12) + 'px';
-  t.style.top = (e.clientY + 12) + 'px';
-  t.style.display = 'block';
-}
-function hideTip() { document.getElementById('tooltip').style.display = 'none'; }
-
-document.getElementById('btnMedian').onclick = () => {
-  metric = 'q50';
-  document.getElementById('btnMedian').classList.add('active');
-  document.getElementById('btnTail').classList.remove('active');
-  render();
+document.getElementById('btn24h').onclick = () => {
+  viewMode = '24h';
+  document.getElementById('btn24h').classList.add('active');
+  document.getElementById('btn2h').classList.remove('active');
+  drawChart();
 };
-document.getElementById('btnTail').onclick = () => {
-  metric = 'q95';
-  document.getElementById('btnTail').classList.add('active');
-  document.getElementById('btnMedian').classList.remove('active');
-  render();
+document.getElementById('btn2h').onclick = () => {
+  viewMode = '2h';
+  document.getElementById('btn2h').classList.add('active');
+  document.getElementById('btn24h').classList.remove('active');
+  drawChart();
 };
 
 document.getElementById('themeToggle').onclick = () => {
   const next = ATGTheme.toggle();
   document.getElementById('themeToggle').textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
+  drawChart();
 };
 document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ? 'Light mode' : 'Dark mode';
 
-loadFleet();
 loadLastUpdated();
 setInterval(renderLastUpdated, 30000); // re-render "X min ago" without refetching
+
+(async function init() {
+  let manifest;
+  try {
+    manifest = await fetchJson('data/manifest.json');
+  } catch (e) {
+    showError(`Failed to load manifest: ${e.message}`);
+    return;
+  }
+  renderNodeButtons(manifest);
+  const params = new URLSearchParams(location.search);
+  const requested = params.get('node');
+  const match = manifest.find(n => n.node_id === requested);
+  if (match) await selectNode(match.node_id);
+  else if (manifest.length) await selectNode(manifest[0].node_id);
+})();
 </script>
 </body>
 </html>
