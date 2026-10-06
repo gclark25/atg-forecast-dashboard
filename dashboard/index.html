@@ -26,6 +26,7 @@
 </head>
 <body>
 
+<a href="fleet.html" style="font-size: 13px; color: #1f3864; text-decoration: none;">&larr; Fleet overview (all nodes)</a>
 <h1>ATG Metis 1 Preview -- HEN Nodal Price Forecasts</h1>
 <div class="subtitle">Current quantile forecast (q05-q95) by node. Refreshed on the ingestion schedule -- see "origin time" below the chart.</div>
 
@@ -122,8 +123,7 @@ async function selectNode(nodeId) {
 (async function init() {
   const manifest = await loadManifest();
   renderNodeButtons(manifest);
-  if (manifest.length) await selectNode(manifest[0].node_id);
-})();
-</script>
-</body>
-</html>
+  const params = new URLSearchParams(location.search);
+  const requested = params.get('node');
+  const match = manifest.find(n => n.node_id === requested);
+  if

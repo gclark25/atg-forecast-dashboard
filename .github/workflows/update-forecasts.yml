@@ -4,7 +4,7 @@ on:
   schedule:
     # Hourly, on the hour -- matches Metis 1's current issuance cadence.
     # Tighten this if/when askthegrid ships 5-15min issuance.
-    - cron: "5 * * * *"
+    - cron: "5,20,35,50 * * * *"
   workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
 
 permissions:

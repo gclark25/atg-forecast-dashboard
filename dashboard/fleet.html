@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ATG Fleet Overview</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: #f5f6f8; color: #1f2937; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
+  a.backlink { font-size: 13px; color: #1f3864; text-decoration: none; }
+  .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+  .controls button {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid #d1d5db;
+    background: #fff; cursor: pointer; font-size: 13px;
+  }
+  .controls button.active { background: #1f3864; color: #fff; border-color: #1f3864; }
+  .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #6b7280; margin-left: auto; }
+  .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #E6F1FB, #378ADD, #042C53); }
+  .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow-x: auto; }
+  table.heat { border-collapse: collapse; font-size: 11px; width: 100%; }
+  table.heat th { font-weight: 500; color: #6b7280; padding: 2px 4px; text-align: center; }
+  table.heat td.node-label {
+    text-align: left; padding: 3px 10px 3px 4px; white-space: nowrap; font-size: 12px;
+    cursor: pointer; position: sticky; left: 0; background: #fff;
+  }
+  table.heat td.node-label:hover { text-decoration: underline; color: #1f3864; }
+  table.heat td.cell { width: 22px; height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
+  .weak-tail-flag { color: #c00000; font-size: 11px; margin-left: 4px; }
+  .loading { color: #6b7280; font-size: 13px; padding: 20px; }
+  .tooltip {
+    position: fixed; background: #1f3864; color: #fff; font-size: 12px; padding: 4px 8px;
+    border-radius: 4px; pointer-events: none; display: none; z-index: 10;
+  }
+</style>
+</head>
+<body>
+
+<a class="backlink" href="index.html">&larr; Back to node detail view</a>
+<h1>ATG Fleet Overview</h1>
+<div class="subtitle" id="subtitle">Loading fleet data...</div>
+
+<div class="controls">
+  <button id="btnMedian" class="active">Median (q50)</button>
+  <button id="btnTail">Tail risk (q95)</button>
+  <div class="legend">Low <div class="legend-bar"></div> High ($/MWh, scaled per column set)</div>
+</div>
+
+<div class="card">
+  <div id="heatContainer" class="loading">Loading...</div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+let metric = 'q50';
+let fleetData = []; // [{node_id, display_name, weak_tail_node, hourly: [val_or_null, ...]}]
+
+async function loadFleet() {
+  const manifestRes = await fetch('data/manifest.json?_=' + Date.now());
+  const manifest = await manifestRes.json();
+
+  const results = await Promise.all(manifest.map(async (m) => {
+    try {
+      const res = await fetch(`data/${m.node_id}_latest.json?_=` + Date.now());
+      const data = await res.json();
+      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: data.rows || [] };
+    } catch (e) {
+      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: [] };
+    }
+  }));
+
+  // Bucket each node's rows into hour-of-horizon buckets 0..23, taking the
+  // first row whose horizon_hours falls in [h, h+1). Nodes don't share the
+  // same origin minute, so "hours ahead" is the fair way to line them up --
+  // not wall-clock time.
+  fleetData = results.map((n) => {
+    const hourly = [];
+    for (let h = 0; h < 24; h++) {
+      const row = n.rows.find(r => r.horizon_hours >= h && r.horizon_hours < h + 1);
+      hourly.push(row ? { q50: row.q50, q95: row.q95 } : null);
+    }
+    return { ...n, hourly };
+  }).filter(n => n.hourly.some(h => h !== null));
+
+  document.getElementById('subtitle').textContent =
+    `${fleetData.length} nodes with live data, bucketed by hours-ahead (not wall clock -- nodes don't share an origin minute)`;
+
+  render();
+}
+
+function colorFor(value, min, max) {
+  if (value === null || value === undefined) return '#eee';
+  const t = max > min ? (value - min) / (max - min) : 0;
+  const stops = [
+    [230, 241, 251], [181, 212, 244], [133, 183, 235],
+    [55, 138, 221], [24, 95, 165], [12, 68, 124], [4, 44, 83],
+  ];
+  const idx = Math.min(stops.length - 2, Math.floor(t * (stops.length - 1)));
+  const frac = t * (stops.length - 1) - idx;
+  const c = stops[idx].map((v, i) => Math.round(v + (stops[idx + 1][i] - v) * frac));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function textColorFor(value, min, max) {
+  const t = max > min ? (value - min) / (max - min) : 0;
+  return t > 0.55 ? '#fff' : '#1f2937';
+}
+
+function render() {
+  const allVals = fleetData.flatMap(n => n.hourly.filter(Boolean).map(h => h[metric]));
+  const min = Math.min(...allVals);
+  const max = Math.max(...allVals);
+
+  const sorted = [...fleetData].sort((a, b) => {
+    const peakA = Math.max(...a.hourly.filter(Boolean).map(h => h[metric]));
+    const peakB = Math.max(...b.hourly.filter(Boolean).map(h => h[metric]));
+    return peakB - peakA;
+  });
+
+  let html = '<table class="heat"><tr><th></th>';
+  for (let h = 0; h < 24; h++) html += `<th>+${h}h</th>`;
+  html += '</tr>';
+
+  for (const n of sorted) {
+    html += `<tr><td class="node-label" onclick="location.href='index.html?node=${n.node_id}'">${n.display_name}`;
+    if (n.weak_tail_node) html += `<span class="weak-tail-flag" title="Known weak tail calibration (q90/q95 under-covers actual prices)">&#9888;</span>`;
+    html += `</td>`;
+    for (const h of n.hourly) {
+      const val = h ? h[metric] : null;
+      const bg = colorFor(val, min, max);
+      const fg = val !== null ? textColorFor(val, min, max) : '#999';
+      const label = val !== null ? `${n.display_name} +${n.hourly.indexOf(h)}h: $${val.toFixed(0)}/MWh` : 'no data';
+      html += `<td class="cell" style="background:${bg};color:${fg}" onmousemove="showTip(event,'${label}')" onmouseleave="hideTip()" onclick="location.href='index.html?node=${n.node_id}'">${val !== null ? Math.round(val) : ''}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  document.getElementById('heatContainer').innerHTML = html;
+}
+
+function showTip(e, text) {
+  const t = document.getElementById('tooltip');
+  t.textContent = text;
+  t.style.left = (e.clientX + 12) + 'px';
+  t.style.top = (e.clientY + 12) + 'px';
+  t.style.display = 'block';
+}
+function hideTip() { document.getElementById('tooltip').style.display = 'none'; }
+
+document.getElementById('btnMedian').onclick = () => {
+  metric = 'q50';
+  document.getElementById('btnMedian').classList.add('active');
+  document.getElementById('btnTail').classList.remove('active');
+  render();
+};
+document.getElementById('btnTail').onclick = () => {
+  metric = 'q95';
+  document.getElementById('btnTail').classList.add('active');
+  document.getElementById('btnMedian').classList.remove('active');
+  render();
+};
+
+loadFleet();
+</script>
+</body>
+</html>
