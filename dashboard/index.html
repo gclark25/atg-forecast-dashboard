@@ -235,7 +235,7 @@ function drawChart() {
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: {
-          ticks: { autoSkip: true, maxTicksLimit: viewMode === '2h' ? 9 : 14, color: pal.tick },
+          ticks: { autoSkip: true, maxTicksLimit: viewMode === '2h' ? 9 : 24, color: pal.tick },
           grid: { color: pal.grid },
         },
         y: { title: { display: true, text: '$/MWh', color: pal.tick }, ticks: { color: pal.tick }, grid: { color: pal.grid } },
@@ -245,8 +245,11 @@ function drawChart() {
         tooltip: {
           callbacks: {
             title: (items) => {
-              const info = heInfo(rows[items[0].dataIndex].target_time);
-              return `${heShort(info)}, ${info.operatingDay} (Central Time)`;
+              const d = new Date(rows[items[0].dataIndex].target_time);
+              const ctStr = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+              }).format(d);
+              return `${ctStr} CT`;
             },
             label: (c) => `${c.dataset.label}: $${c.parsed.y.toFixed(2)}/MWh`,
           },
