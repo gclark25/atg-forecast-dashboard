@@ -1,25 +1,20 @@
 """
 Client for askthegrid.com's `GET /api/v1/grid/forecasts` endpoint, confirmed
-against their real OpenAPI spec (received 2026-10-06). Replaces the earlier
-placeholder version.
+against their real OpenAPI spec (received 2026-10-06), and verified against a
+real pull on 2026-10-06 (93 rows/node, monotonic quantiles, no fallback
+warnings logged).
 
-Two things are still genuinely unconfirmed because the OpenAPI schema
-describes shapes, not the actual string values a live response contains --
-fix these once you've made one real call and can see them:
+Two things were worth double-checking against a live response and both came
+back clean -- see the Status section in the README for the evidence:
 
 1. SOURCE_MATCH below -- which `series[].source` entry is Metis 1 Preview.
-   The spec confirms `series` can hold multiple forecast sources per node;
-   we select by a fuzzy name match. Check the first real response's
-   `series[].source.id` / `.shortName` / `.displayName` and tighten this if
-   it ever selects the wrong one.
+   Confirmed: picked the right series on the first try, all 5 nodes.
 2. The exact string keys inside each point's `levels` dict for q05/q25/q75/
-   q95 (p10/p50/p90 are confirmed top-level fields, not in `levels`). The
-   schema only says `levels` is `{str: number}`; `_extract_quantile` below
-   tries a few plausible encodings ("0.05", "5", "p05") -- check a real
-   response and adjust CANDIDATE_KEY_FORMATS if none of them hit.
+   q95 (p10/p50/p90 are confirmed top-level fields, not in `levels`).
+   Confirmed: `_extract_quantile`'s first-tried key format hit every time.
 
 Everything else here (base URL, auth scheme, endpoint path, param names,
-response field names) is taken directly from the spec, not guessed.
+response field names) is taken directly from the spec.
 """
 
 import os
@@ -40,7 +35,7 @@ API_KEY_ENV = "ASKTHEGRID_API_KEY"
 QUANTILE_LEVELS = {"q05": 0.05, "q10": 0.10, "q25": 0.25, "q50": 0.50, "q75": 0.75, "q90": 0.90, "q95": 0.95}
 TOP_LEVEL_FIELD = {0.10: "p10", 0.50: "p50", 0.90: "p90"}
 
-SOURCE_MATCH = "metis"  # CONFIRM against a real series[].source once you can see one
+SOURCE_MATCH = "metis"  # verified correct against a live pull, 2026-10-06
 
 
 class AskTheGridError(RuntimeError):
@@ -165,16 +160,41 @@ def parse_forecast_response(raw: dict, node_id: str) -> list[dict]:
     return out
 
 
-def fetch_all(nodes: list[dict]) -> dict[str, list[dict]]:
-    """Fetch latest forecast for every configured node. Returns node_id -> rows."""
+def extract_series_meta(raw: dict) -> dict | None:
+    """
+    Pull the source-level metadata the dashboard displays alongside the chart
+    (how far out this forecast actually reaches, how often it's issued, etc.)
+    -- separate from the per-point quantile rows, since this is one value per
+    pull, not one per row.
+    """
+    series = _select_metis_series(raw)
+    if series is None:
+        return None
+    src = series.get("source", {}) or {}
+    return {
+        "display_name": src.get("displayName"),
+        "model_id": src.get("modelId"),
+        "horizon_hours": src.get("horizonHours"),
+        "issue_cadence_minutes": src.get("issueCadenceMinutes"),
+        "resolution_minutes": src.get("resolutionMinutes"),
+    }
+
+
+def fetch_all(nodes: list[dict]) -> dict[str, dict]:
+    """
+    Fetch latest forecast for every configured node.
+    Returns node_id -> {"rows": [...], "meta": {...} | None}.
+    """
     results = {}
     for node in nodes:
         node_id = node["node_id"]
         try:
             raw = get_latest_forecast(node_id)
-            results[node_id] = parse_forecast_response(raw, node_id)
-            log.info("pulled %d rows for %s", len(results[node_id]), node_id)
+            rows = parse_forecast_response(raw, node_id)
+            meta = extract_series_meta(raw)
+            results[node_id] = {"rows": rows, "meta": meta}
+            log.info("pulled %d rows for %s", len(rows), node_id)
         except AskTheGridError as e:
             log.error("failed to pull %s: %s", node_id, e)
-            results[node_id] = []
+            results[node_id] = {"rows": [], "meta": None}
     return results

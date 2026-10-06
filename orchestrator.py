@@ -68,7 +68,7 @@ def append_new_rows(node_id: str, rows: list[dict]) -> int:
     return len(new_rows)
 
 
-def write_latest_snapshot(node_id: str, display_name: str, rows: list[dict], is_weak_tail: bool):
+def write_latest_snapshot(node_id: str, display_name: str, rows: list[dict], is_weak_tail: bool, meta: dict | None):
     DASHBOARD_DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
@@ -81,6 +81,7 @@ def write_latest_snapshot(node_id: str, display_name: str, rows: list[dict], is_
         "display_name": display_name,
         "origin_time": latest_origin,
         "weak_tail_node": is_weak_tail,
+        "source_meta": meta,  # e.g. how far this forecast actually reaches, issue cadence
         "rows": snapshot_rows,
     }
     with open(DASHBOARD_DATA_DIR / f"{node_id}_latest.json", "w") as f:
@@ -97,9 +98,11 @@ def main():
     manifest = []
     for node in nodes:
         node_id = node["node_id"]
-        rows = results.get(node_id, [])
+        entry = results.get(node_id, {"rows": [], "meta": None})
+        rows = entry["rows"]
+        meta = entry["meta"]
         added = append_new_rows(node_id, rows)
-        write_latest_snapshot(node_id, node["display_name"], rows, node_id in weak_tail)
+        write_latest_snapshot(node_id, node["display_name"], rows, node_id in weak_tail, meta)
         log.info("%s: %d rows pulled, %d new", node_id, len(rows), added)
         manifest.append({
             "node_id": node_id,

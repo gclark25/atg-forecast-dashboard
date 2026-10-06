@@ -8,22 +8,30 @@ Cloudflare Pages to host it.
 ## Status
 
 Built against askthegrid's real OpenAPI spec (`GET /api/v1/grid/forecasts`,
-bearer auth, base URL `https://askthegrid.com`) -- not a guess anymore. Not
-yet run against the live API with a real key, though. Two things are still
-genuinely unconfirmed because the spec describes shapes, not actual values --
-fix these once you've made one real call (see the `CONFIRM` comments in
-`integrations/askthegrid.py`):
+bearer auth, base URL `https://askthegrid.com`) and **verified against a real
+pull on 2026-10-06** (all 5 nodes, 93 rows each): quantiles came back
+monotonic (q05 < q10 < ... < q95) on every row, and no `SOURCE_MATCH` fallback
+warning was logged, so both previously-open items are confirmed working:
 
-1. `SOURCE_MATCH` -- which `series[].source` entry is Metis 1 Preview, if the
-   response ever returns more than one forecast source for a node.
-2. The exact string keys inside each point's `levels` dict for q05/q25/q75/
-   q95 (p10/p50/p90 are confirmed top-level fields). `_extract_quantile` tries
-   a few plausible encodings; check a real response and adjust if none hit.
+1. `SOURCE_MATCH = "metis"` correctly picked the right `series[].source` on
+   the first try, across all 5 nodes. Revisit only if a future pull logs a
+   fallback warning (e.g. the vendor adds a second forecast source per node).
+2. The `levels` dict key-guessing in `_extract_quantile` hit on the first
+   format tried for every point observed so far.
 
-Good news from the spec: each forecast point carries the settled `actual`
-price once ERCOT has published it, right alongside the quantiles. That means
-`scripts/score_accuracy.py` can score straight off `data/<node>/forecast_log.jsonl`
-with no separate ERCOT settlement-price join -- see below.
+Each forecast point also carries the settled `actual` price once ERCOT has
+published it, right alongside the quantiles -- confirmed live (currently
+`null` for all points, since every pulled point is still in the future
+relative to the pull). That means `scripts/score_accuracy.py` scores straight
+off `data/<node>/forecast_log.jsonl`'s `truth` column, no separate ERCOT
+settlement-price join needed.
+
+One thing worth asking James: the live pull returned **~23 hours of horizon**
+(93 rows at 15-min resolution), not the 48h the backtest data implied.
+`source_meta.horizon_hours` in each dashboard snapshot file will show the
+vendor's own stated horizon on the next pull -- worth checking whether 23h is
+the current live ceiling (vs. the backtest's 48h) or just what happened to be
+available at pull time.
 
 ## Setup
 

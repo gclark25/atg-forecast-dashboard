@@ -109,8 +109,14 @@ async function selectNode(nodeId) {
     },
   });
 
-  document.getElementById('chartMeta').textContent =
-    `Node: ${data.display_name} (${data.node_id}) -- origin time: ${data.origin_time} -- ${data.rows.length} target intervals`;
+  let metaStr = `Node: ${data.display_name} (${data.node_id}) -- origin time: ${data.origin_time} -- ${data.rows.length} target intervals`;
+  if (data.source_meta) {
+    const m = data.source_meta;
+    if (m.display_name) metaStr += ` -- source: ${m.display_name}`;
+    if (m.horizon_hours) metaStr += ` -- forecast horizon: ${m.horizon_hours}h`;
+    if (m.issue_cadence_minutes) metaStr += ` -- issued every ${m.issue_cadence_minutes}min`;
+  }
+  document.getElementById('chartMeta').textContent = metaStr;
 }
 
 (async function init() {
