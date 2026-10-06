@@ -9,7 +9,7 @@ nodes:
   - display_name: "Fort Duncan"
     node_id: FTDUNCAN_RN
     hen_asset: true
-  - display_name: "Olney AGR"
+  - display_name: "Olney"
     node_id: OLNEYTN_RN
     hen_asset: true
   - display_name: "Junction (Schreiner)"
