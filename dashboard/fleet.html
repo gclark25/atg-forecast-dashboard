@@ -3,46 +3,77 @@
 <head>
 <meta charset="UTF-8">
 <title>ATG Fleet Overview</title>
+<script src="theme.js"></script>
 <style>
-  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: #f5f6f8; color: #1f2937; }
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
+    --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
+    --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
+    --cell-empty: #eee; --tooltip-bg: #1f3864;
+  }
+  html[data-theme="dark"] {
+    --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
+    --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
+    --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
+    --cell-empty: #2a2f3a; --tooltip-bg: #374151;
+  }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
   h1 { font-size: 20px; margin-bottom: 4px; }
-  .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
-  a.backlink { font-size: 13px; color: #1f3864; text-decoration: none; }
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; }
+  .theme-toggle {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
+  }
+  a.backlink { font-size: 13px; color: var(--accent); text-decoration: none; }
   .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
   .controls button {
-    padding: 6px 14px; border-radius: 6px; border: 1px solid #d1d5db;
-    background: #fff; cursor: pointer; font-size: 13px;
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
-  .controls button.active { background: #1f3864; color: #fff; border-color: #1f3864; }
-  .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #6b7280; margin-left: auto; }
+  .controls button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); margin-left: auto; }
   .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #E6F1FB, #378ADD, #042C53); }
-  .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow-x: auto; }
+  .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); overflow-x: auto; }
   .error-box {
-    background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
-    font-size: 13px; margin-bottom: 16px; display: none; font-family: monospace; white-space: pre-wrap;
+    background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; display: none;
+    font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
-  table.heat { border-collapse: collapse; font-size: 11px; width: 100%; }
-  table.heat th { font-weight: 500; color: #6b7280; padding: 2px 4px; text-align: center; white-space: pre-line; }
-  table.heat td.node-label {
-    text-align: left; padding: 3px 10px 3px 4px; white-space: nowrap; font-size: 12px;
-    cursor: pointer; position: sticky; left: 0; background: #fff;
+  /* table-layout:fixed + no width:100% so the browser doesn't dump all
+     leftover space into the one column without an explicit width (the
+     label column) -- that was the cause of the big gap before the grid. */
+  table.heat { border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  table.heat th {
+    font-weight: 500; color: var(--text-secondary); padding: 2px 4px; text-align: center;
+    white-space: pre-line; width: 44px;
   }
-  table.heat td.node-label:hover { text-decoration: underline; color: #1f3864; }
-  table.heat td.cell { width: 22px; height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
-  .weak-tail-flag { color: #c00000; font-size: 11px; margin-left: 4px; }
-  .loading { color: #6b7280; font-size: 13px; padding: 20px; }
+  table.heat th:first-child, table.heat td.node-label { width: 150px; }
+  table.heat td.node-label {
+    text-align: left; padding: 3px 10px 3px 4px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; font-size: 12px; cursor: pointer; position: sticky; left: 0; background: var(--card);
+  }
+  table.heat td.node-label:hover { text-decoration: underline; color: var(--accent); }
+  table.heat td.cell { width: 44px; height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
+  .weak-tail-flag { color: var(--caveat-border); font-size: 11px; margin-left: 4px; }
+  .loading { color: var(--text-secondary); font-size: 13px; padding: 20px; }
   .tooltip {
-    position: fixed; background: #1f3864; color: #fff; font-size: 12px; padding: 4px 8px;
+    position: fixed; background: var(--tooltip-bg); color: #fff; font-size: 12px; padding: 4px 8px;
     border-radius: 4px; pointer-events: none; display: none; z-index: 10;
   }
 </style>
 </head>
 <body>
 
-<a class="backlink" href="index.html">&larr; Back to node detail view</a>
-<h1>ATG Fleet Overview</h1>
-<div class="subtitle" id="subtitle">Loading fleet data...</div>
+<div class="topbar">
+  <div>
+    <a class="backlink" href="index.html">&larr; Back to node detail view</a>
+    <h1>ATG Fleet Overview</h1>
+    <div class="subtitle" id="subtitle">Loading fleet data...</div>
+  </div>
+  <button class="theme-toggle" id="themeToggle">Dark mode</button>
+</div>
 
 <div class="error-box" id="errorBox"></div>
 
@@ -61,7 +92,7 @@
 <script>
 let metric = 'q50';
 let fleetData = []; // [{node_id, display_name, weak_tail_node, byHe: Map(heKey -> {q50,q95,operatingDay,he})}]
-let heColumns = []; // ordered list of {key, label, operatingDay, he}
+let heColumns = []; // ordered list of {key, label}
 
 // ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
 function ctParts(iso) {
@@ -80,8 +111,7 @@ function heInfo(iso) {
   const he = hour + 1;
   const quarter = Math.floor(minute / 15);
   const key = `${date}-HE${he}`;
-  const label = `HE${he}\n${date.slice(5)}`;
-  return { operatingDay: date, he, quarter, key, label };
+  return { operatingDay: date, he, quarter, key };
 }
 
 function showError(msg) {
@@ -127,35 +157,41 @@ async function loadFleet() {
 
   // Group every row by its own real HE bucket (Central Time), not by
   // horizon-hours-from-origin -- nodes don't share an origin minute, but
-  // "HE18 on Oct 6" means the same thing for every node, so this is the
-  // framing that actually lines the fleet up for an operational question.
+  // "HE18 on Oct 6" means the same thing for every node.
   const allKeys = new Set();
   const withBuckets = results.map((n) => {
     const byHe = new Map();
     for (const r of n.rows) {
       const info = heInfo(r.target_time);
       if (!byHe.has(info.key)) {
-        byHe.set(info.key, { q50: r.q50, q95: r.q95, operatingDay: info.operatingDay, he: info.he, label: info.label });
+        byHe.set(info.key, { q50: r.q50, q95: r.q95, operatingDay: info.operatingDay, he: info.he });
         allKeys.add(info.key);
       }
     }
     return { ...n, byHe };
   }).filter(n => n.byHe.size > 0);
 
-  heColumns = [...allKeys].sort().map(key => {
-    for (const n of withBuckets) if (n.byHe.has(key)) return { key, label: n.byHe.get(key).label };
+  // Column label shows the day only when it changes across the sorted
+  // column sequence, same decluttering as the detail chart's x-axis.
+  const sortedKeys = [...allKeys].sort();
+  let prevDay = null;
+  heColumns = sortedKeys.map(key => {
+    const [day, heStr] = [key.slice(0, 10), key.slice(11)];
+    const showDay = day !== prevDay;
+    if (showDay) prevDay = day;
+    return { key, label: showDay ? `${heStr}\n${day.slice(5)}` : heStr };
   });
 
   fleetData = withBuckets;
 
   document.getElementById('subtitle').textContent =
-    `${fleetData.length} nodes with live data, columns are real ERCOT Hour-Ending intervals in Central Time (not horizon-relative)`;
+    `${fleetData.length} nodes with live data -- columns are real ERCOT Hour-Ending intervals, Central Time`;
 
   render();
 }
 
 function colorFor(value, min, max) {
-  if (value === null || value === undefined) return '#eee';
+  if (value === null || value === undefined) return 'var(--cell-empty)';
   const t = max > min ? (value - min) / (max - min) : 0;
   const stops = [
     [230, 241, 251], [181, 212, 244], [133, 183, 235],
@@ -193,14 +229,14 @@ function render() {
   html += '</tr>';
 
   for (const n of sorted) {
-    html += `<tr><td class="node-label" onclick="location.href='index.html?node=${n.node_id}'">${n.display_name}`;
+    html += `<tr><td class="node-label" title="${n.display_name}" onclick="location.href='index.html?node=${n.node_id}'">${n.display_name}`;
     if (n.weak_tail_node) html += `<span class="weak-tail-flag" title="Known weak tail calibration (q90/q95 under-covers actual prices)">&#9888;</span>`;
     html += `</td>`;
     for (const col of heColumns) {
       const cell = n.byHe.get(col.key);
       const val = cell ? cell[metric] : null;
       const bg = colorFor(val, min, max);
-      const fg = val !== null ? textColorFor(val, min, max) : '#999';
+      const fg = val !== null ? textColorFor(val, min, max) : 'var(--text-secondary)';
       const label = val !== null ? `${n.display_name} ${col.label.replace('\n', ' ')}: $${val.toFixed(0)}/MWh` : 'no data';
       html += `<td class="cell" style="background:${bg};color:${fg}" onmousemove="showTip(event,'${label}')" onmouseleave="hideTip()" onclick="location.href='index.html?node=${n.node_id}'">${val !== null ? Math.round(val) : ''}</td>`;
     }
@@ -231,6 +267,12 @@ document.getElementById('btnTail').onclick = () => {
   document.getElementById('btnMedian').classList.remove('active');
   render();
 };
+
+document.getElementById('themeToggle').onclick = () => {
+  const next = ATGTheme.toggle();
+  document.getElementById('themeToggle').textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
+};
+document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ? 'Light mode' : 'Dark mode';
 
 loadFleet();
 </script>

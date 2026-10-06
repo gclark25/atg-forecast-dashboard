@@ -3,43 +3,66 @@
 <head>
 <meta charset="UTF-8">
 <title>ATG Metis 1 Forecast Dashboard</title>
+<script src="theme.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
-  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: #f5f6f8; color: #1f2937; }
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
+    --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
+    --accent2: #0f6e56; --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
+  }
+  html[data-theme="dark"] {
+    --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
+    --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
+    --accent2: #2dd4bf; --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
+  }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
   h1 { font-size: 20px; margin-bottom: 4px; }
-  .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 20px; }
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+  .theme-toggle {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
+  }
   .node-select { margin-bottom: 16px; }
   .node-select button {
-    padding: 6px 14px; margin-right: 8px; margin-bottom: 6px; border-radius: 6px; border: 1px solid #d1d5db;
-    background: #fff; cursor: pointer; font-size: 13px;
+    padding: 6px 14px; margin-right: 8px; margin-bottom: 6px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
-  .node-select button.active { background: #1f3864; color: #fff; border-color: #1f3864; }
+  .node-select button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .view-toggle { margin-bottom: 16px; }
   .view-toggle button {
-    padding: 6px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid #d1d5db;
-    background: #fff; cursor: pointer; font-size: 13px;
+    padding: 6px 14px; margin-right: 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
-  .view-toggle button.active { background: #0f6e56; color: #fff; border-color: #0f6e56; }
-  .card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px; }
+  .view-toggle button.active { background: var(--accent2); color: var(--accent-text); border-color: var(--accent2); }
+  .card { background: var(--card); border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); margin-bottom: 16px; }
   .caveat {
-    background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
-    font-size: 13px; margin-bottom: 16px; display: none;
+    background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; display: none;
   }
   .caveat.show { display: block; }
   .error-box {
-    background: #fde8e8; border-left: 4px solid #c00000; padding: 10px 14px; border-radius: 6px;
-    font-size: 13px; margin-bottom: 16px; display: none; font-family: monospace; white-space: pre-wrap;
+    background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; display: none;
+    font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
-  .meta { font-size: 12px; color: #6b7280; margin-top: 8px; }
+  .meta { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
   canvas { max-height: 420px; }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
 
-<a href="fleet.html" style="font-size: 13px; color: #1f3864; text-decoration: none;">&larr; Fleet overview (all nodes)</a>
-<h1>ATG Metis 1 Preview -- HEN Nodal Price Forecasts</h1>
-<div class="subtitle">Current quantile forecast (q05-q95) by node, labeled in ERCOT Hour-Ending (HE), Central Time.</div>
+<div class="topbar">
+  <div>
+    <a href="fleet.html" style="font-size: 13px; text-decoration: none;">&larr; Fleet overview (all nodes)</a>
+    <h1>ATG Metis 1 Preview -- HEN Nodal Price Forecasts</h1>
+    <div class="subtitle">Quantile forecast (q05-q95) by node, in ERCOT Hour-Ending (HE), Central Time.</div>
+  </div>
+  <button class="theme-toggle" id="themeToggle">Dark mode</button>
+</div>
 
 <div class="error-box" id="errorBox"></div>
 
@@ -53,7 +76,7 @@
 </div>
 
 <div class="view-toggle">
-  <button id="btn24h" class="active">24-hour horizon (HE)</button>
+  <button id="btn24h" class="active">24-hour horizon</button>
   <button id="btn2h">Next 2 hours (15min)</button>
 </div>
 
@@ -84,8 +107,10 @@ function heInfo(iso) {
   const { date, hour, minute } = ctParts(iso);
   const he = hour + 1; // ERCOT Hour Ending: HE1 = 00:00-01:00 CT ... HE24 = 23:00-24:00 CT
   const quarter = Math.floor(minute / 15); // 0=:00, 1=:15, 2=:30, 3=:45
-  const label = `HE${he}` + (quarter ? `:${String(quarter * 15).padStart(2, '0')}` : '');
-  return { operatingDay: date, he, quarter, label };
+  return { operatingDay: date, he, quarter };
+}
+function heShort(info) {
+  return info.quarter === 0 ? `HE${info.he}` : `HE${info.he}:${String(info.quarter * 15).padStart(2, '0')}`;
 }
 
 function showError(msg) {
@@ -123,25 +148,50 @@ function setActiveButton(nodeId) {
   if (btn) btn.classList.add('active');
 }
 
+function chartPalette() {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  return dark
+    ? {
+        q95: 'rgba(240,120,120,0.45)', q95fill: 'rgba(240,120,120,0.12)',
+        q90: 'rgba(240,120,120,0.65)', q90fill: 'rgba(240,120,120,0.18)',
+        q75: 'rgba(120,150,230,0.45)', q75fill: 'rgba(120,150,230,0.15)',
+        q50: '#8fb3ff', grid: 'rgba(255,255,255,0.08)', tick: '#9ca3af',
+      }
+    : {
+        q95: 'rgba(192,0,0,0.3)', q95fill: 'rgba(192,0,0,0.08)',
+        q90: 'rgba(192,0,0,0.5)', q90fill: 'rgba(192,0,0,0.12)',
+        q75: 'rgba(31,56,100,0.3)', q75fill: 'rgba(31,56,100,0.10)',
+        q50: '#1f3864', grid: 'rgba(0,0,0,0.06)', tick: '#6b7280',
+      };
+}
+
 function drawChart() {
   if (!currentData) return;
   const allRows = [...currentData.rows].sort((a, b) => new Date(a.target_time) - new Date(b.target_time));
   const rows = viewMode === '2h' ? allRows.filter(r => r.horizon_hours <= 2) : allRows;
 
+  // 24h view: label only on-the-hour points (declutters 94 points down to
+  // ~23 ticks); 2h view: label every point since there are only ~8.
+  let prevDay = null;
   const labels = rows.map(r => {
-    const he = heInfo(r.target_time);
-    return viewMode === '2h' ? he.label : `${he.label}\n${he.operatingDay.slice(5)}`;
+    const info = heInfo(r.target_time);
+    if (viewMode === '24h' && info.quarter !== 0) return '';
+    const lines = [heShort(info)];
+    if (info.operatingDay !== prevDay) { lines.push(info.operatingDay.slice(5)); prevDay = info.operatingDay; }
+    return lines;
   });
   const series = (key) => rows.map(r => r[key]);
+  const pal = chartPalette();
+  const pr = viewMode === '2h' ? 3 : 0;
 
   const datasets = [
-    { label: 'q95', data: series('q95'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'rgba(192,0,0,0.08)', fill: '+1', pointRadius: viewMode === '2h' ? 3 : 0 },
-    { label: 'q90', data: series('q90'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'rgba(192,0,0,0.12)', fill: '+1', pointRadius: viewMode === '2h' ? 3 : 0 },
-    { label: 'q75', data: series('q75'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'rgba(31,56,100,0.10)', fill: '+1', pointRadius: viewMode === '2h' ? 3 : 0 },
-    { label: 'q50 (median)', data: series('q50'), borderColor: '#1f3864', backgroundColor: 'transparent', pointRadius: viewMode === '2h' ? 4 : 0, borderWidth: 2 },
-    { label: 'q25', data: series('q25'), borderColor: 'rgba(31,56,100,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: viewMode === '2h' ? 3 : 0 },
-    { label: 'q10', data: series('q10'), borderColor: 'rgba(192,0,0,0.5)', backgroundColor: 'transparent', fill: false, pointRadius: viewMode === '2h' ? 3 : 0 },
-    { label: 'q05', data: series('q05'), borderColor: 'rgba(192,0,0,0.3)', backgroundColor: 'transparent', fill: false, pointRadius: viewMode === '2h' ? 3 : 0 },
+    { label: 'q95', data: series('q95'), borderColor: pal.q95, backgroundColor: pal.q95fill, fill: '+1', pointRadius: pr },
+    { label: 'q90', data: series('q90'), borderColor: pal.q90, backgroundColor: pal.q90fill, fill: '+1', pointRadius: pr },
+    { label: 'q75', data: series('q75'), borderColor: pal.q75, backgroundColor: pal.q75fill, fill: '+1', pointRadius: pr },
+    { label: 'q50 (median)', data: series('q50'), borderColor: pal.q50, backgroundColor: 'transparent', pointRadius: viewMode === '2h' ? 4 : 0, borderWidth: 2 },
+    { label: 'q25', data: series('q25'), borderColor: pal.q75, backgroundColor: 'transparent', fill: false, pointRadius: pr },
+    { label: 'q10', data: series('q10'), borderColor: pal.q90, backgroundColor: 'transparent', fill: false, pointRadius: pr },
+    { label: 'q05', data: series('q05'), borderColor: pal.q95, backgroundColor: 'transparent', fill: false, pointRadius: pr },
   ];
 
   if (chart) chart.destroy();
@@ -152,25 +202,28 @@ function drawChart() {
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ticks: { maxTicksLimit: viewMode === '2h' ? 9 : 12, autoSkip: viewMode !== '2h' } },
-        y: { title: { display: true, text: '$/MWh' } },
+        x: {
+          ticks: { autoSkip: true, maxTicksLimit: viewMode === '2h' ? 9 : 14, color: pal.tick },
+          grid: { color: pal.grid },
+        },
+        y: { title: { display: true, text: '$/MWh', color: pal.tick }, ticks: { color: pal.tick }, grid: { color: pal.grid } },
       },
       plugins: {
-        legend: { position: 'bottom' },
+        legend: { position: 'bottom', labels: { color: pal.tick } },
         tooltip: { callbacks: { label: (c) => `${c.dataset.label}: $${c.parsed.y.toFixed(2)}/MWh` } },
       },
     },
   });
 
-  const firstHe = rows.length ? heInfo(rows[0].target_time) : null;
-  let metaStr = `Node: ${currentData.display_name} (${currentData.node_id}) -- origin: ${currentData.origin_time} -- ${rows.length} intervals`;
-  if (firstHe) metaStr += ` -- starting ${firstHe.label}, operating day ${firstHe.operatingDay} CT`;
+  const firstInfo = rows.length ? heInfo(rows[0].target_time) : null;
+  let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} intervals`;
+  if (firstInfo) metaStr += ` starting ${heShort(firstInfo)}, operating day ${firstInfo.operatingDay} (Central Time)`;
   if (currentData.source_meta) {
     const m = currentData.source_meta;
-    if (m.display_name) metaStr += ` -- source: ${m.display_name}`;
-    if (m.horizon_hours) metaStr += ` -- forecast horizon: ${m.horizon_hours}h`;
-    if (m.issue_cadence_minutes) metaStr += ` -- issued every ${m.issue_cadence_minutes}min`;
+    if (m.horizon_hours) metaStr += ` -- forecast horizon ${m.horizon_hours}h`;
+    if (m.issue_cadence_minutes) metaStr += `, issued every ${m.issue_cadence_minutes}min`;
   }
+  metaStr += ` -- pull issued ${currentData.origin_time} UTC`;
   document.getElementById('chartMeta').textContent = metaStr;
 }
 
@@ -199,6 +252,13 @@ document.getElementById('btn2h').onclick = () => {
   document.getElementById('btn24h').classList.remove('active');
   drawChart();
 };
+
+document.getElementById('themeToggle').onclick = () => {
+  const next = ATGTheme.toggle();
+  document.getElementById('themeToggle').textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
+  drawChart();
+};
+document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ? 'Light mode' : 'Dark mode';
 
 (async function init() {
   let manifest;
