@@ -21,11 +21,14 @@
   h1 { font-size: 20px; margin-bottom: 4px; }
   .topbar { display: flex; justify-content: space-between; align-items: flex-start; }
   .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; }
-  .theme-toggle {
+    .theme-toggle {
     padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
+    .last-updated { font-size: 12px; color: var(--text-secondary); margin-top: 6px; text-align: right; }
+    .last-updated.stale { color: var(--caveat-border); font-weight: 500; }
   a.backlink { font-size: 13px; color: var(--accent); text-decoration: none; }
+  a.backlink
   .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
   .controls button {
     padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
@@ -72,7 +75,10 @@
     <h1>ATG Fleet Overview</h1>
     <div class="subtitle" id="subtitle">Loading fleet data...</div>
   </div>
-  <button class="theme-toggle" id="themeToggle">Dark mode</button>
+    <div>
+        <button class="theme-toggle" id="themeToggle">Dark mode</button>
+        <div class="last-updated" id="lastUpdated"></div>
+    </div>
 </div>
 
 <div class="error-box" id="errorBox"></div>
@@ -129,6 +135,33 @@ async function fetchJson(path) {
   } catch (e) {
     throw new Error(`${path} did not return valid JSON (got: ${text.slice(0, 120)}...)`);
   }
+}
+
+let lastUpdatedIso = null;
+function formatLastUpdated(iso) {
+  const d = new Date(iso);
+  const ctStr = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(d);
+  const minsAgo = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
+  const agoStr = minsAgo < 1 ? 'just now' : minsAgo === 1 ? '1 min ago' : `${minsAgo} min ago`;
+  return { text: `Last updated ${ctStr} CT (${agoStr})`, stale: minsAgo > 20 };
+}
+function renderLastUpdated() {
+  const el = document.getElementById('lastUpdated');
+  if (!lastUpdatedIso) { el.textContent = 'Last updated: unknown'; return; }
+  const { text, stale } = formatLastUpdated(lastUpdatedIso);
+  el.textContent = text;
+  el.classList.toggle('stale', stale);
+}
+async function loadLastUpdated() {
+  try {
+    const data = await fetchJson('data/run_status.json');
+    lastUpdatedIso = data.generated_at;
+  } catch (e) {
+    lastUpdatedIso = null;
+  }
+  renderLastUpdated();
 }
 
 async function loadFleet() {
@@ -275,6 +308,8 @@ document.getElementById('themeToggle').onclick = () => {
 document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ? 'Light mode' : 'Dark mode';
 
 loadFleet();
+loadLastUpdated();
+setInterval(renderLastUpdated, 30000); // re-render "X min ago" without refetching
 </script>
 </body>
 </html>
