@@ -21,14 +21,13 @@
   h1 { font-size: 20px; margin-bottom: 4px; }
   .topbar { display: flex; justify-content: space-between; align-items: flex-start; }
   .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; }
-    .theme-toggle {
+  .theme-toggle {
     padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
   }
-    .last-updated { font-size: 12px; color: var(--text-secondary); margin-top: 6px; text-align: right; }
-    .last-updated.stale { color: var(--caveat-border); font-weight: 500; }
+  .last-updated { font-size: 12px; color: var(--text-secondary); margin-top: 6px; text-align: right; }
+  .last-updated.stale { color: var(--caveat-border); font-weight: 500; }
   a.backlink { font-size: 13px; color: var(--accent); text-decoration: none; }
-  a.backlink
   .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
   .controls button {
     padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
@@ -44,21 +43,22 @@
     font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
-  /* table-layout:fixed + no width:100% so the browser doesn't dump all
-     leftover space into the one column without an explicit width (the
-     label column) -- that was the cause of the big gap before the grid. */
-  table.heat { border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  /* Column widths come from the <colgroup> rendered in JS (one fixed-px
+     label column + N equal calc() shares for the rest) -- that's what
+     stretches the table to fill the card instead of leaving blank space
+     after the last column. table-layout:fixed is required for <col>
+     widths to actually govern cell sizing rather than being a hint. */
+  table.heat { border-collapse: collapse; font-size: 11px; table-layout: fixed; width: 100%; }
   table.heat th {
     font-weight: 500; color: var(--text-secondary); padding: 2px 4px; text-align: center;
-    white-space: pre-line; width: 44px;
+    white-space: pre-line;
   }
-  table.heat th:first-child, table.heat td.node-label { width: 150px; }
   table.heat td.node-label {
     text-align: left; padding: 3px 10px 3px 4px; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; font-size: 12px; cursor: pointer; position: sticky; left: 0; background: var(--card);
   }
   table.heat td.node-label:hover { text-decoration: underline; color: var(--accent); }
-  table.heat td.cell { width: 44px; height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
+  table.heat td.cell { height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
   .weak-tail-flag { color: var(--caveat-border); font-size: 11px; margin-left: 4px; }
   .loading { color: var(--text-secondary); font-size: 13px; padding: 20px; }
   .tooltip {
@@ -75,10 +75,10 @@
     <h1>ATG Fleet Overview</h1>
     <div class="subtitle" id="subtitle">Loading fleet data...</div>
   </div>
-    <div>
-        <button class="theme-toggle" id="themeToggle">Dark mode</button>
-        <div class="last-updated" id="lastUpdated"></div>
-    </div>
+  <div>
+    <button class="theme-toggle" id="themeToggle">Dark mode</button>
+    <div class="last-updated" id="lastUpdated"></div>
+  </div>
 </div>
 
 <div class="error-box" id="errorBox"></div>
@@ -257,7 +257,13 @@ function render() {
     return peakB - peakA;
   });
 
-  let html = '<table class="heat"><tr><th></th>';
+  const labelColWidth = '150px';
+  let html = '<table class="heat"><colgroup>';
+  html += `<col style="width:${labelColWidth}">`;
+  for (let i = 0; i < heColumns.length; i++) {
+    html += `<col style="width:calc((100% - ${labelColWidth}) / ${heColumns.length})">`;
+  }
+  html += '</colgroup><tr><th></th>';
   for (const col of heColumns) html += `<th>${col.label}</th>`;
   html += '</tr>';
 
