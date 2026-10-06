@@ -7,14 +7,23 @@ Cloudflare Pages to host it.
 
 ## Status
 
-Scaffold only -- not yet run against the real API. Three things need
-confirming against askthegrid's actual docs before this works (see the
-`CONFIRM` comments in `integrations/askthegrid.py`):
+Built against askthegrid's real OpenAPI spec (`GET /api/v1/grid/forecasts`,
+bearer auth, base URL `https://askthegrid.com`) -- not a guess anymore. Not
+yet run against the live API with a real key, though. Two things are still
+genuinely unconfirmed because the spec describes shapes, not actual values --
+fix these once you've made one real call (see the `CONFIRM` comments in
+`integrations/askthegrid.py`):
 
-1. Base URL / endpoint path for "latest forecast by node"
-2. Auth header scheme (assumed `Authorization: Bearer <key>` -- confirm)
-3. Response field names (assumed to match the CSV schema we already graded:
-   `origin_time`, `target_time`, `horizon_hours`, `q05`...`q95`)
+1. `SOURCE_MATCH` -- which `series[].source` entry is Metis 1 Preview, if the
+   response ever returns more than one forecast source for a node.
+2. The exact string keys inside each point's `levels` dict for q05/q25/q75/
+   q95 (p10/p50/p90 are confirmed top-level fields). `_extract_quantile` tries
+   a few plausible encodings; check a real response and adjust if none hit.
+
+Good news from the spec: each forecast point carries the settled `actual`
+price once ERCOT has published it, right alongside the quantiles. That means
+`scripts/score_accuracy.py` can score straight off `data/<node>/forecast_log.jsonl`
+with no separate ERCOT settlement-price join -- see below.
 
 ## Setup
 
@@ -51,12 +60,15 @@ with a real API token instead -- see the commented step at the bottom of
 ## What's not built yet
 
 - **Live accuracy scorecard**: `scripts/score_accuracy.py` has the same
-  pinball-loss/calibration math as the Sep 2026 backtest workbook, but it
-  isn't wired into the schedule. It needs ERCOT settlement prices joined in
-  against `data/<node>/forecast_log.jsonl` by `target_time` -- natural fit
-  for the existing ERCOT RTM settlement price collector. This is the thing
-  that eventually tells you the pilot has graduated (q90 coverage 87-93%
-  for 3 straight months including a high-price month).
+  pinball-loss/calibration math as the Sep 2026 backtest workbook, and now
+  scores directly off `data/<node>/forecast_log.jsonl`'s `truth` column
+  (populated from the API's own `actual` field -- no ERCOT join needed). It
+  just isn't wired into the schedule yet. Note that `truth` is often still
+  null for recent rows -- the forecast log is append-only, so simply re-reading
+  the same file days later picks up actuals as ERCOT settles them; you don't
+  need to re-pull. This is the thing that eventually tells you the pilot has
+  graduated (q90 coverage 87-93% for 3 straight months including a high-price
+  month).
 - **Push to the RT dispatch tool.** Out of scope for this repo -- this is a
   display dashboard. Internal push (new forecast in `data/` → notify the
   dispatch tool) can sit on top of this once that tool exists; external

@@ -3,14 +3,19 @@ Live accuracy scorecard -- same pinball-loss / calibration methodology as the
 Sep 2026 backtest workbook, run against whatever's accumulated in
 data/<node>/forecast_log.jsonl so far.
 
-Not wired into the GitHub Actions schedule yet on purpose: this only becomes
-useful once (a) actual settled prices are available to compare against (the
-log only stores the forecast side right now -- you'll need to join in ERCOT
-settlement prices, e.g. via the existing ERCOT np6-905-cd RTM settlement
-point price feed, keyed on node_id + target_time) and (b) enough history has
-accumulated to be meaningful. Run manually for now:
+Scores straight off the log's `truth` column (populated from askthegrid's own
+`actual` field on each forecast point -- no separate ERCOT settlement join
+needed). `truth` will be null for rows whose target_time hasn't settled yet;
+score() drops those automatically, so just re-run this later as more of the
+log fills in -- you don't need to re-pull anything.
 
-    python scripts/score_accuracy.py data/FTDUNCAN_RN/forecast_log.jsonl --actuals path/to/ercot_actuals.csv
+Not wired into the GitHub Actions schedule yet on purpose: only useful once
+enough history has accumulated to be meaningful. Run manually for now:
+
+    python scripts/score_accuracy.py data/FTDUNCAN_RN/forecast_log.jsonl
+
+Pass --actuals only if you want to score against some other actuals source
+instead of (or to backfill gaps in) the log's own truth column.
 
 This is the thing that will eventually tell you the pilot has graduated:
 q90 coverage within ~87-93% for 3 consecutive months including at least one
@@ -61,16 +66,18 @@ def score(df: pd.DataFrame) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("forecast_log")
-    ap.add_argument("--actuals", help="CSV with node_id, target_time, truth columns to join in", required=False)
+    ap.add_argument("--actuals", help="optional CSV with node_id, target_time, truth to override/backfill the log's own truth column", required=False)
     args = ap.parse_args()
 
     df = load_forecast_log(args.forecast_log)
 
     if args.actuals:
         actuals = pd.read_csv(args.actuals)
-        df = df.merge(actuals[["node_id", "target_time", "truth"]], on=["node_id", "target_time"], how="left")
+        df = df.drop(columns=["truth"], errors="ignore").merge(
+            actuals[["node_id", "target_time", "truth"]], on=["node_id", "target_time"], how="left"
+        )
     elif "truth" not in df.columns:
-        print("No actuals joined and forecast log has no truth column -- nothing to score yet.")
+        print("Forecast log has no truth column and no --actuals given -- nothing to score yet.")
         return
 
     result = score(df)
