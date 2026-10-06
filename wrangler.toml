@@ -1,5 +1,6 @@
 name = "atg-forecast-dashboard"
 compatibility_date = "2026-10-06"
+workers_dev = true
 
 [assets]
 directory = "dashboard"
