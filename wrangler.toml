@@ -12,12 +12,30 @@ crons = ["5,20,35,50 * * * *"]
 
 [assets]
 directory = "dashboard"
-# Without this, requests to /data/* would be served as static files (there
-# aren't any anymore -- the Worker now serves this data out of KV). This
-# routes those paths to the Worker's fetch() handler first; everything else
-# (index.html, fleet.html, theme.js) still falls through to ASSETS unchanged.
-run_worker_first = ["/data/*"]
+# Required for env.ASSETS.fetch() to work in worker.js's fetch() handler --
+# without an explicit binding name here, env.ASSETS is undefined, which is
+# exactly what caused the "Cannot read properties of undefined (reading
+# 'fetch')" error seen in wrangler tail.
+binding = "ASSETS"
+# Switched from a path-pattern array to a plain boolean -- the array form
+# (["/data/*", "/debug/*"]) deployed with no error but had no actual effect
+# (requests to /debug/run-pull still hit Cloudflare's built-in 404 instead of
+# our fetch() handler), suggesting that syntax either isn't supported in this
+# Wrangler version or wasn't being parsed as intended. This routes every
+# request through worker.js's fetch() first; our code already falls through
+# to env.ASSETS.fetch(request) for anything that isn't /data/* or /debug/*,
+# so index.html/fleet.html/theme.js are unaffected.
+run_worker_first = true
 
 [[kv_namespaces]]
 binding = "FORECASTS_KV"
 id = "4039b25afa8140269a13d17e060624c6"
+
+# Persists logs (including scheduled/cron invocation history) to the
+# dashboard so past runs are checkable after the fact, not just live via
+# `wrangler tail`. Currently set via the dashboard UI only -- adding it here
+# so a future `wrangler deploy` doesn't silently revert it.
+[observability.logs]
+enabled = true
+invocation_logs = true
+persist = true

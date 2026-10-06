@@ -326,6 +326,20 @@ document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ?
 loadFleet();
 loadLastUpdated();
 setInterval(renderLastUpdated, 30000); // re-render "X min ago" without refetching
+
+// Checks run_status.json every 2 minutes -- cheap single-key read, well
+// within KV's free read quota even polled this often. Only re-fetches and
+// re-renders the full heatmap (the heavier call: manifest + all node data)
+// if generated_at has genuinely changed, since the underlying forecast only
+// updates ~every 15min regardless of how often we check.
+async function checkForNewData() {
+  const previousIso = lastUpdatedIso;
+  await loadLastUpdated();
+  if (lastUpdatedIso && lastUpdatedIso !== previousIso) {
+    await loadFleet();
+  }
+}
+setInterval(checkForNewData, 120000);
 </script>
 </body>
 </html>
