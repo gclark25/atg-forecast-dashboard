@@ -232,7 +232,13 @@ function drawChart() {
   const labels = rows.map(r => {
     const info = heInfo(r.target_time);
     if (viewMode === '24h' && info.quarter !== 0) return '';
-    const lines = [heShort(info)];
+    // 2h view matches the tooltip's plain-time convention (no HE prefix);
+    // 24h view keeps HE labels -- that's the operational framework for
+    // the wider horizon.
+    const mainLabel = viewMode === '2h'
+      ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(r.target_time))
+      : heShort(info);
+    const lines = [mainLabel];
     if (info.operatingDay !== prevDay) { lines.push(info.operatingDay.slice(5)); prevDay = info.operatingDay; }
     return lines;
   });
