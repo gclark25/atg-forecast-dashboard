@@ -1,10 +1,9 @@
-# HEN nodes with Metis 1 Preview API access enabled.
-# Add a new entry here as soon as James turns on another node --
-# nothing else in the pipeline needs to change.
-#
-# display_name: what shows up on the dashboard
-# node_id: askthegrid / ERCOT resource node ID
-# hen_asset: true if this is a live HEN asset (vs. a comp/eval-only node)
+# HEN's full 32-node ERCOT BESS fleet. Not all of these necessarily have
+# Metis 1 Preview API access turned on yet -- fetch_all() in
+# integrations/askthegrid.py already handles per-node failures gracefully
+# (logs an error, continues to the next node), so the safe way to find out
+# which ones are live is just to re-run orchestrator.py and see which nodes
+# log "pulled N rows" vs "failed to pull".
 
 nodes:
   - display_name: "Fort Duncan"
@@ -13,19 +12,102 @@ nodes:
   - display_name: "Olney AGR"
     node_id: OLNEYTN_RN
     hen_asset: true
-  - display_name: "Junction"
+  - display_name: "Junction (Schreiner)"
     node_id: JUNCTION_RN
-    hen_asset: false
+    hen_asset: true
   - display_name: "Coyote Springs"
     node_id: COYOTSPR_RN
-    hen_asset: false
+    hen_asset: true
   - display_name: "Lonestar"
     node_id: LONESTAR_RN
-    hen_asset: false
+    hen_asset: true
+  - display_name: "Cherry Creek"
+    node_id: TOYAH_RN
+    hen_asset: true
+  - display_name: "Saddleback"
+    node_id: SADLBACK_RN
+    hen_asset: true
+  - display_name: "Faulkner"
+    node_id: FAULKNER_RN
+    hen_asset: true
+  - display_name: "Catarina (La Huerta)"
+    node_id: CATARINA_B1
+    hen_asset: true
+  - display_name: "Holcomb (Burro)"
+    node_id: HOLCOMB_RN1
+    hen_asset: true
+  - display_name: "Rattlesnake"
+    node_id: RTLSNAKE_BT
+    hen_asset: true
+  - display_name: "Cedarvale"
+    node_id: CEDRVALE_RN
+    hen_asset: true
+  - display_name: "Screwbean"
+    node_id: SBEAN_BESS
+    hen_asset: true
+  - display_name: "Gomez"
+    node_id: GOMEZ_RN
+    hen_asset: true
+  - display_name: "Dibol"
+    node_id: DIBOL_RN
+    hen_asset: true
+  - display_name: "Val Verde"
+    node_id: MV_VALV4_RN
+    hen_asset: true
+  - display_name: "Hamilton (Alma)"
+    node_id: HAMI_BESS_RN
+    hen_asset: true
+  - display_name: "Weil Tract (Elote)"
+    node_id: WLTC_ESR_RN
+    hen_asset: true
+  - display_name: "Mainland"
+    node_id: MAINLAND_RN
+    hen_asset: true
+  - display_name: "Mineral Wells East"
+    node_id: MNWL_BESS_RN
+    hen_asset: true
+  - display_name: "Garden City East"
+    node_id: GRDNE_ESR_RN
+    hen_asset: true
+  - display_name: "Farmersville"
+    node_id: FRMRSVLW_RN
+    hen_asset: true
+  - display_name: "Lufkin South"
+    node_id: LFSTH_RN
+    hen_asset: true
+  - display_name: "Judkins"
+    node_id: JDKNS_RN
+    hen_asset: true
+  - display_name: "Pauline"
+    node_id: PAULN_RN
+    hen_asset: true
+  - display_name: "Cisco (Red Gap)"
+    node_id: CISC_RN
+    hen_asset: true
+  - display_name: "Falfurrias (Duarte)"
+    node_id: FALFUR_RN
+    hen_asset: true
+  - display_name: "Russek St"
+    node_id: RUSSEKST_RN
+    hen_asset: true
+  - display_name: "Pavlov (Canine)"
+    node_id: PAVLOV_BT_RN
+    hen_asset: true
+  - display_name: "Poteet"
+    node_id: POTEETS_RN
+    hen_asset: true
+  - display_name: "Tynan"
+    node_id: TYNAN_RN
+    hen_asset: true
+  - display_name: "Sandlake"
+    node_id: SANDLAKE_RN
+    hen_asset: true
 
 # Nodes known to under-cover the upper tail (q90/q95) based on the Sep 2026
 # backtest -- see /areas/askthegrid-forecast-eval notes. The dashboard shows
-# a caveat banner for these specifically.
+# a caveat banner for these specifically. Nothing yet known about the other
+# 27 -- add to this list only once a backtest or live scorecard shows the
+# same pattern.
 weak_tail_nodes:
   - JUNCTION_RN
   - OLNEYTN_RN
