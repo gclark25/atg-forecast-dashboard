@@ -224,8 +224,8 @@ function nodeIdForPath(pathname) {
 //   GET  .../session/{sessionId}/stream?startIndex=N -> NDJSON event stream.
 //
 // Off by default (CHAT_ENABLED var in wrangler.toml): every message spends
-// askthegrid usage, and this site has no login, so turn it on only once
-// something like Cloudflare Access is in front of it.
+// askthegrid usage. The whole site now sits behind the password gate below,
+// so once chat is on, only people with that password can reach this route.
 const CHAT_SESSION_URL = `${BASE_URL}/api/v1/agent/runtime/v1/session`;
 const CHAT_MARKET = 'ERCOT'; // fixed server-side; never taken from the browser
 const MAX_CHAT_MESSAGE_CHARS = 4000;
@@ -318,42 +318,87 @@ async function handleChat(request, env) {
   });
 }
 
+// ---- Site password gate (HTTP Basic) ----
+//
+// Every request to the site goes through fetch() below, and this check runs
+// first, so one password covers the pages, the forecast data and the chat.
+// The browser shows its own login box once, then re-sends the credentials
+// automatically (the username is ignored -- only the password is checked).
+//
+// This depends on `run_worker_first = true` in wrangler.toml: that setting is
+// what makes the static pages (index.html, fleet.html) pass through fetch()
+// at all. If it's ever removed, those pages would be served without this check.
+//
+// Fails CLOSED: if SITE_PASSWORD is missing or shorter than 16 characters the
+// site refuses every request rather than quietly serving everyone. The cron
+// pull (scheduled()) doesn't go through fetch() and is unaffected.
+const MIN_SITE_PASSWORD_CHARS = 16;
+
+async function sha256(text) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+}
+
+// Compares without revealing where two strings first differ: both are hashed
+// to equal-length digests and every byte is compared before answering.
+async function passwordMatches(supplied, expected) {
+  const [a, b] = await Promise.all([sha256(supplied), sha256(expected)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+function readBasicPassword(request) {
+  const m = (request.headers.get('Authorization') || '').match(/^Basic\s+(.+)$/i);
+  if (!m) return null;
+  let decoded;
+  try {
+    const bytes = Uint8Array.from(atob(m[1].trim()), (c) => c.charCodeAt(0));
+    decoded = new TextDecoder().decode(bytes);
+  } catch (e) {
+    return null;
+  }
+  const colon = decoded.indexOf(':'); // username can't contain ':', but the password can
+  return colon === -1 ? null : decoded.slice(colon + 1);
+}
+
+// Returns a Response if the request must be stopped, or null if it may proceed.
+async function checkSiteGate(request, env) {
+  // trim(): a stray newline pasted into `wrangler secret put` would otherwise
+  // make the real password impossible to type.
+  const expected = typeof env.SITE_PASSWORD === 'string' ? env.SITE_PASSWORD.trim() : '';
+  if (expected.length < MIN_SITE_PASSWORD_CHARS) {
+    return new Response(
+      `Site locked: SITE_PASSWORD must be set to at least ${MIN_SITE_PASSWORD_CHARS} characters.`,
+      { status: 503, headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
+  const supplied = readBasicPassword(request);
+  if (supplied !== null && (await passwordMatches(supplied, expected))) return null;
+  return new Response('Authentication required.', {
+    status: 401,
+    headers: {
+      'WWW-Authenticate': 'Basic realm="ATG Forecast Dashboard", charset="UTF-8"',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(pullAndStore(env));
   },
 
   async fetch(request, env, ctx) {
+    const blocked = await checkSiteGate(request, env);
+    if (blocked) return blocked;
+
     const url = new URL(request.url);
 
-    // Temporary, no-auth diagnostic: isolates "is routing even reaching
-    // fetch() for /debug/*" from "is the key comparison below failing" --
-    // a 404 on /debug/run-pull is consistent with EITHER, since both end
-    // up falling through to the same ASSETS 404 page. Remove once resolved.
-    if (url.pathname === '/debug/ping') {
-      return new Response('pong', { status: 200 });
-    }
-
-    // Temporary: reveals enough about the stored secret to spot a mismatch
-    // (stray whitespace, wrong key, truncation) without ever printing the
-    // full value anywhere. Remove once the key issue is resolved.
-    if (url.pathname === '/debug/keycheck') {
-      const k = env.ASKTHEGRID_API_KEY || '';
-      return new Response(JSON.stringify({
-        present: !!env.ASKTHEGRID_API_KEY,
-        length: k.length,
-        first6: k.slice(0, 6),
-        last6: k.slice(-6),
-        hasLeadingWhitespace: k !== k.trimStart(),
-        hasTrailingWhitespace: k !== k.trimEnd(),
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // Temporary manual-trigger route for debugging the cron pull directly
-    // against real KV/secrets without needing wrangler dev --remote (which
-    // tunnels through Cloudflare's edge and can trip loop-protection).
-    // Gated behind the existing API key so it's not a public trigger.
-    // Safe to remove once the schedule is confirmed working reliably.
+    // Manual "pull now" trigger. Needs the site password (gate above) AND the
+    // full askthegrid key in ?key=. Handy after any change to how data is
+    // stored, so you don't wait for the next cron tick. (The /debug/ping and
+    // /debug/keycheck routes that used to sit here were removed: keycheck
+    // revealed the first and last six characters of the API key.)
     if (url.pathname === '/debug/run-pull' && url.searchParams.get('key') === env.ASKTHEGRID_API_KEY) {
       await pullAndStore(env);
       return new Response('Pull complete -- check Observability logs and /data/manifest.json', { status: 200 });
