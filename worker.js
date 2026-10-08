@@ -212,6 +212,112 @@ function nodeIdForPath(pathname) {
   return m ? m[1] : null;
 }
 
+// ---- Chat: proxies the dashboard's chat panel to askthegrid's grid agent ----
+//
+// The browser never sees the API key: it posts to /api/chat on this Worker,
+// which submits the turn upstream and streams the NDJSON answer back.
+// Upstream contract (from askthegrid's published OpenAPI 3.1 file):
+//   POST /api/v1/agent/runtime/v1/session   -> returns immediately; session id
+//        comes back in the x-atg-agent-session-id header. Requires headers
+//        x-atg-iso (market the turn is locked to) and x-atg-turn-id (16-200
+//        chars of [A-Za-z0-9_-], makes a retried submit idempotent).
+//   GET  .../session/{sessionId}/stream?startIndex=N -> NDJSON event stream.
+//
+// Off by default (CHAT_ENABLED var in wrangler.toml): every message spends
+// askthegrid usage, and this site has no login, so turn it on only once
+// something like Cloudflare Access is in front of it.
+const CHAT_SESSION_URL = `${BASE_URL}/api/v1/agent/runtime/v1/session`;
+const CHAT_MARKET = 'ERCOT'; // fixed server-side; never taken from the browser
+const MAX_CHAT_MESSAGE_CHARS = 4000;
+
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
+async function handleChat(request, env) {
+  if (request.method !== 'POST') return jsonResponse({ error: 'method_not_allowed' }, 405);
+  if (env.CHAT_ENABLED !== 'true') return jsonResponse({ error: 'chat_disabled' }, 403);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return jsonResponse({ error: 'invalid_json' }, 400);
+  }
+
+  const message = typeof body.message === 'string' ? body.message.trim() : '';
+  if (!message) return jsonResponse({ error: 'empty_message' }, 400);
+  if (message.length > MAX_CHAT_MESSAGE_CHARS) {
+    return jsonResponse({ error: 'message_too_long', maxChars: MAX_CHAT_MESSAGE_CHARS }, 400);
+  }
+
+  const clientSessionId = body.sessionId == null ? null : body.sessionId;
+  if (clientSessionId !== null && (typeof clientSessionId !== 'string' || clientSessionId.length < 1 || clientSessionId.length > 300)) {
+    return jsonResponse({ error: 'invalid_session_id' }, 400);
+  }
+
+  // Which event index to start reading from. Only matters for follow-up turns
+  // in an existing session (the client tracks how many events it has already
+  // processed); a new session always starts at 0.
+  const startIndex = Number.isInteger(body.startIndex) && body.startIndex >= 0 && body.startIndex <= 1000000
+    ? body.startIndex
+    : 0;
+
+  const submitBody = { message };
+  if (clientSessionId) submitBody.sessionId = clientSessionId;
+
+  const authHeaders = { Authorization: `Bearer ${env.ASKTHEGRID_API_KEY}` };
+
+  let submitRes;
+  try {
+    submitRes = await fetch(CHAT_SESSION_URL, {
+      method: 'POST',
+      headers: {
+        ...authHeaders,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'x-atg-iso': CHAT_MARKET,
+        'x-atg-turn-id': `hen-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify(submitBody),
+    });
+  } catch (e) {
+    return jsonResponse({ error: 'upstream_unreachable' }, 502);
+  }
+  if (!submitRes.ok) {
+    const detail = (await submitRes.text()).slice(0, 300);
+    return jsonResponse({ error: 'upstream_error', upstreamStatus: submitRes.status, detail }, 502);
+  }
+
+  const sessionId = submitRes.headers.get('x-atg-agent-session-id') || clientSessionId;
+  if (!sessionId) return jsonResponse({ error: 'no_session_id_returned' }, 502);
+
+  let streamRes;
+  try {
+    streamRes = await fetch(
+      `${CHAT_SESSION_URL}/${encodeURIComponent(sessionId)}/stream?startIndex=${startIndex}`,
+      { headers: { ...authHeaders, Accept: 'application/x-ndjson' } },
+    );
+  } catch (e) {
+    return jsonResponse({ error: 'upstream_unreachable' }, 502);
+  }
+  if (!streamRes.ok || !streamRes.body) {
+    return jsonResponse({ error: 'stream_error', upstreamStatus: streamRes.status }, 502);
+  }
+
+  return new Response(streamRes.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/x-ndjson',
+      'Cache-Control': 'no-store',
+      'x-atg-agent-session-id': sessionId,
+    },
+  });
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(pullAndStore(env));
@@ -251,6 +357,13 @@ export default {
     if (url.pathname === '/debug/run-pull' && url.searchParams.get('key') === env.ASKTHEGRID_API_KEY) {
       await pullAndStore(env);
       return new Response('Pull complete -- check Observability logs and /data/manifest.json', { status: 200 });
+    }
+
+    if (url.pathname === '/api/chat/status') {
+      return jsonResponse({ enabled: env.CHAT_ENABLED === 'true' });
+    }
+    if (url.pathname === '/api/chat') {
+      return handleChat(request, env);
     }
 
     const kvKey = KV_ROUTES[url.pathname];

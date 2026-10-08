@@ -53,6 +53,37 @@
   .meta { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
   canvas { max-height: 420px; }
   a { color: var(--accent); }
+
+  /* Chat panel -- hidden until /api/chat/status says chat is enabled */
+  .chat-card { display: none; }
+  .chat-card.show { display: block; }
+  .chat-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .chat-title { font-size: 15px; font-weight: 600; }
+  .chat-link { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0; }
+  .chat-context { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }
+  .chat-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .chat-chips button {
+    padding: 5px 12px; border-radius: 14px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 12px;
+  }
+  .chat-messages { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+  .chat-messages:empty { display: none; }
+  .msg { padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 92%; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
+  .msg.agent { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); }
+  .msg.status { align-self: flex-start; background: none; color: var(--text-secondary); font-style: italic; padding: 0 4px; }
+  .msg.error { align-self: flex-start; background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text); }
+  .chat-input-row { display: flex; gap: 8px; align-items: flex-end; }
+  .chat-input-row textarea {
+    flex: 1; resize: none; min-height: 38px; max-height: 120px; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px;
+  }
+  .chat-input-row button {
+    padding: 8px 18px; border-radius: 6px; border: 1px solid var(--accent);
+    background: var(--accent); color: var(--accent-text); cursor: pointer; font-size: 13px;
+  }
+  .chat-input-row button:disabled { opacity: 0.5; cursor: default; }
+  .chat-note { font-size: 11px; color: var(--text-secondary); margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -88,6 +119,25 @@
 <div class="card">
   <canvas id="forecastChart"></canvas>
   <div class="meta" id="chartMeta"></div>
+</div>
+
+<div class="card chat-card" id="chatCard">
+  <div class="chat-head">
+    <div class="chat-title">Ask the grid agent</div>
+    <button class="chat-link" id="chatReset" type="button">New conversation</button>
+  </div>
+  <div class="chat-context" id="chatContext"></div>
+  <div class="chat-chips" id="chatChips">
+    <button type="button">Why is the evening peak this high?</button>
+    <button type="button">What could push prices above the q95 band tonight?</button>
+    <button type="button">How has this node settled versus its hub recently?</button>
+  </div>
+  <div class="chat-messages" id="chatMessages"></div>
+  <div class="chat-input-row">
+    <textarea id="chatInput" rows="1" placeholder="Ask about this forecast, this node, or the market..."></textarea>
+    <button id="chatSend" type="button">Send</button>
+  </div>
+  <div class="chat-note">Answers come from Ask the Grid's agent (ERCOT). Verify anything you plan to act on.</div>
 </div>
 
 <script>
@@ -304,6 +354,7 @@ async function selectNode(nodeId) {
   }
   document.getElementById('tailCaveat').classList.toggle('show', !!currentData.weak_tail_node);
   drawChart();
+  updateChatContextLine();
 }
 
 document.getElementById('btn24h').onclick = () => {
@@ -342,6 +393,188 @@ async function checkForNewData() {
   }
 }
 setInterval(checkForNewData, 120000);
+
+// ---------------------------------------------------------------------------
+// Chat panel. Talks to this site's own /api/chat (the Worker holds the
+// askthegrid key and proxies the agent); the panel stays hidden unless
+// /api/chat/status reports chat is enabled.
+// ---------------------------------------------------------------------------
+let chatSessionId = null;
+let chatEventsConsumed = 0; // events already processed in this session -> startIndex for follow-up turns
+let chatBusy = false;
+
+// <chat-stream-parser>
+const CHAT_TERMINAL_EVENTS = new Set(['turn.completed', 'turn.failed', 'session.waiting', 'session.completed', 'session.failed']);
+
+// Reads an NDJSON response body, calling onEvent(event) for each line. Stops
+// (and cancels the reader) at the first event that ends the turn, because the
+// upstream stream may stay open waiting for the next message.
+async function readNdjsonTurn(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let eventsConsumed = 0;
+  let endedBy = null;
+
+  const handleLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    eventsConsumed++;
+    let ev = null;
+    try { ev = JSON.parse(trimmed); } catch (e) { return false; }
+    if (ev && typeof ev === 'object') {
+      onEvent(ev);
+      if (CHAT_TERMINAL_EVENTS.has(ev.type)) { endedBy = ev.type; return true; }
+    }
+    return false;
+  };
+
+  outer: while (true) {
+    const { value, done } = await reader.read();
+    if (done) { if (buffer) handleLine(buffer); break; }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (handleLine(line)) break outer;
+    }
+  }
+  if (endedBy) { try { await reader.cancel(); } catch (e) {} }
+  return { eventsConsumed, endedBy };
+}
+// </chat-stream-parser>
+
+// <chat-context-builder>
+// A short, factual summary of what's on screen, prefixed to each question so
+// "this node" / "tonight" mean something to the agent.
+function buildChatContext() {
+  if (!currentData || !currentData.rows || !currentData.rows.length) return '';
+  const peakOf = (key) => {
+    const withValue = currentData.rows.filter((r) => typeof r[key] === 'number');
+    if (!withValue.length) return null;
+    return withValue.reduce((best, r) => (r[key] > best[key] ? r : best), withValue[0]);
+  };
+  const p50 = peakOf('q50');
+  const p95 = peakOf('q95');
+  let ctx = `[Dashboard context -- node ${currentData.node_id} (${currentData.display_name}), ERCOT. ` +
+    `On screen: Metis 1 Preview forecast issued ${formatCtDateTime(currentData.origin_time)}, ${currentData.rows.length} 15-minute intervals.`;
+  if (p50) ctx += ` Median (q50) peaks at $${p50.q50.toFixed(0)}/MWh around ${formatCtDateTime(p50.target_time)}.`;
+  if (p95) ctx += ` q95 peaks at $${p95.q95.toFixed(0)}/MWh around ${formatCtDateTime(p95.target_time)}.`;
+  return ctx + ' All times Central.]\n\n';
+}
+// </chat-context-builder>
+
+function updateChatContextLine() {
+  const el = document.getElementById('chatContext');
+  el.textContent = currentData
+    ? `Asking about: ${currentData.display_name} (${currentData.node_id}) -- forecast issued ${formatCtDateTime(currentData.origin_time)}`
+    : '';
+}
+
+function chatAppend(kind, text) {
+  const box = document.getElementById('chatMessages');
+  const el = document.createElement('div');
+  el.className = `msg ${kind}`;
+  el.textContent = text; // textContent, never innerHTML: model output is untrusted text
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+  document.getElementById('chatChips').style.display = 'none';
+  return el;
+}
+
+async function sendChat(rawText) {
+  const text = (rawText || '').trim();
+  if (!text || chatBusy) return;
+  chatBusy = true;
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('chatSend');
+  sendBtn.disabled = true;
+  input.value = '';
+
+  chatAppend('user', text);
+  const statusEl = chatAppend('status', 'Thinking...');
+  const box = document.getElementById('chatMessages');
+  let agentEl = null;
+  let agentText = '';
+  let failed = false;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: buildChatContext() + text,
+        sessionId: chatSessionId,
+        startIndex: chatEventsConsumed,
+      }),
+    });
+
+    if (!res.ok) {
+      let msg = `Chat request failed (HTTP ${res.status}).`;
+      try {
+        const j = await res.json();
+        if (j.error === 'chat_disabled') msg = 'Chat is not enabled on this deployment.';
+        else if (j.error === 'upstream_error') msg = `Ask the Grid returned an error (HTTP ${j.upstreamStatus})${j.detail ? ': ' + j.detail : ''}`;
+        else if (j.error) msg = `Chat error: ${j.error}`;
+      } catch (e) { /* keep the generic message */ }
+      statusEl.remove();
+      chatAppend('error', msg);
+      return;
+    }
+
+    const sid = res.headers.get('x-atg-agent-session-id');
+    if (sid) chatSessionId = sid;
+
+    const { eventsConsumed, endedBy } = await readNdjsonTurn(res, (ev) => {
+      if (ev.type === 'message.appended') {
+        const delta = ev.data && ev.data.messageDelta;
+        if (typeof delta === 'string' && delta) {
+          if (!agentEl) { statusEl.remove(); agentEl = chatAppend('agent', ''); }
+          agentText += delta;
+          agentEl.textContent = agentText;
+          box.scrollTop = box.scrollHeight;
+        }
+      } else if (ev.type === 'actions.requested') {
+        statusEl.textContent = 'Looking up data...';
+      } else if (ev.type === 'action.result') {
+        statusEl.textContent = 'Working through the results...';
+      } else if (ev.type === 'turn.failed' || ev.type === 'session.failed') {
+        failed = true;
+      }
+    });
+    chatEventsConsumed += eventsConsumed;
+    statusEl.remove();
+
+    if (failed) chatAppend('error', 'The agent could not complete that turn. Try again, or rephrase the question.');
+    else if (!agentText) chatAppend('error', endedBy ? 'The agent finished without sending a text answer.' : 'The connection ended before an answer arrived.');
+  } catch (e) {
+    statusEl.remove();
+    chatAppend('error', 'Could not reach the dashboard server. Check your connection and try again.');
+  } finally {
+    chatBusy = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+}
+
+function resetChat() {
+  chatSessionId = null;
+  chatEventsConsumed = 0;
+  document.getElementById('chatMessages').innerHTML = '';
+  document.getElementById('chatChips').style.display = 'flex';
+}
+
+document.getElementById('chatSend').onclick = () => sendChat(document.getElementById('chatInput').value);
+document.getElementById('chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(e.target.value); }
+});
+document.getElementById('chatReset').onclick = resetChat;
+document.querySelectorAll('#chatChips button').forEach((b) => { b.onclick = () => sendChat(b.textContent); });
+
+fetch('/api/chat/status')
+  .then((r) => (r.ok ? r.json() : { enabled: false }))
+  .then((j) => { if (j.enabled) document.getElementById('chatCard').classList.add('show'); })
+  .catch(() => { /* leave the panel hidden */ });
 
 (async function init() {
   let manifest;

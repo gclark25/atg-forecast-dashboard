@@ -10,6 +10,13 @@ main = "worker.js"
 [triggers]
 crons = ["5,20,35,50 * * * *"]
 
+# The /api/chat route (dashboard chat panel -> askthegrid's grid agent)
+# stays off until this is "true". Every message spends askthegrid usage and
+# the site has no login, so flip it only once something like Cloudflare
+# Access is in front of the site. Change it here and run `npx wrangler deploy`.
+[vars]
+CHAT_ENABLED = "false"
+
 [assets]
 directory = "dashboard"
 # Required for env.ASSETS.fetch() to work in worker.js's fetch() handler --
