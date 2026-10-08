@@ -10,12 +10,12 @@ main = "worker.js"
 [triggers]
 crons = ["5,20,35,50 * * * *"]
 
-# The /api/chat route (dashboard chat panel -> askthegrid's grid agent)
-# stays off until this is "true". Every message spends askthegrid usage and
-# the site has no login, so flip it only once something like Cloudflare
-# Access is in front of the site. Change it here and run `npx wrangler deploy`.
+# The /api/chat route (dashboard chat panel -> askthegrid's grid agent).
+# "true" turns it on; the whole site sits behind the SITE_PASSWORD gate in
+# worker.js, and every message spends askthegrid usage. To switch chat back
+# off, set this to "false" and run `npx wrangler deploy`.
 [vars]
-CHAT_ENABLED = "false"
+CHAT_ENABLED = "true"
 
 [assets]
 directory = "dashboard"
