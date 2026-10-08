@@ -11,11 +11,14 @@ main = "worker.js"
 crons = ["5,20,35,50 * * * *"]
 
 # The /api/chat route (dashboard chat panel -> askthegrid's grid agent).
-# "true" turns it on; the whole site sits behind the SITE_PASSWORD gate in
-# worker.js, and every message spends askthegrid usage. To switch chat back
-# off, set this to "false" and run `npx wrangler deploy`.
+# OFF for now: as of 2026-10-08 askthegrid's agent endpoint answers every
+# API-key call with 401 AUTH_REQUIRED (capability agent.ask), though the same
+# request works in their console while signed in. Waiting on their reply.
+# When access is sorted out, set this to "true" and run `npx wrangler deploy`.
+# The whole site sits behind the SITE_PASSWORD gate in worker.js, and every
+# message spends askthegrid usage (about $0.10 per turn as reported).
 [vars]
-CHAT_ENABLED = "true"
+CHAT_ENABLED = "false"
 
 [assets]
 directory = "dashboard"
