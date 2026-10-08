@@ -82,5 +82,4 @@ with a real API token instead -- see the commented step at the bottom of
   dispatch tool) can sit on top of this once that tool exists; external
   push (askthegrid webhook vs. polling) depends on whether Matt confirms
   webhook support.
-- **Full fleet.** Only the 5 nodes with API access today are in
-  `config/nodes.yaml`. Add rows as more get turned on.
+
