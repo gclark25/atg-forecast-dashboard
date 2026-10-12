@@ -46,7 +46,7 @@ nodes:
     node_id: SBEAN_BESS
     hen_asset: true
   - display_name: "Gomez"
-    node_id: GOMEZ_RN
+    node_id: GOMZ_RN
     hen_asset: true
   - display_name: "Dibol"
     node_id: DIBOL_RN
