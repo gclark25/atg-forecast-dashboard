@@ -35,7 +35,7 @@
   }
   .controls button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); margin-left: auto; }
-  .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #fee5d9, #fcbba1, #fc9272, #fb6a4a, #ef3b2c, #cb181d, #99000d); }
+  .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #2166ac, #67a9cf, #d1e5f0, #f7f7f7, #fddbc7, #ef8a62, #b2182b); }
   .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); overflow-x: auto; }
   .error-box {
     background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
@@ -254,12 +254,26 @@ async function loadFleet() {
   render();
 }
 
-// Sequential red ramp (ColorBrewer "Reds"): pale = low, deep red = high, so
-// the deeper the red, the higher the price. Same legend colors as the bar above.
-const RAMP_STOPS = [
-  [254, 229, 217], [252, 187, 161], [252, 146, 114],
-  [251, 106, 74], [239, 59, 44], [203, 24, 29], [153, 0, 13],
-];
+// Heat palette: blue = low, red = high.
+//   'diverging' -> blue, white, red (ColorBrewer RdBu)
+//   'thermal'   -> blue, yellow, red (ColorBrewer RdYlBu, weather-map style)
+// Change the word below to switch; the cells and the legend bar both follow it.
+const HEAT_PALETTE = 'diverging';
+const PALETTES = {
+  diverging: [
+    [33, 102, 172], [103, 169, 207], [209, 229, 240], [247, 247, 247],
+    [253, 219, 199], [239, 138, 98], [178, 24, 43],
+  ],
+  thermal: [
+    [49, 54, 149], [69, 117, 180], [116, 173, 209], [224, 243, 248], [255, 255, 191],
+    [253, 174, 97], [244, 109, 67], [215, 48, 39], [165, 0, 38],
+  ],
+};
+const RAMP_STOPS = PALETTES[HEAT_PALETTE] || PALETTES.diverging;
+
+// Paint the legend bar from the same stops the cells use.
+document.querySelector('.legend-bar').style.background =
+  `linear-gradient(to right, ${RAMP_STOPS.map((c) => `rgb(${c[0]},${c[1]},${c[2]})`).join(', ')})`;
 
 function rampRgb(value, min, max) {
   const t = max > min ? (value - min) / (max - min) : 0;
@@ -284,8 +298,8 @@ function luminance(rgb) {
 }
 
 // Number text is black or white, whichever has the higher contrast against the
-// cell. A fixed cutoff worked for the blue ramp but misjudges mid-range reds,
-// which are the hardest colors to put either text color on.
+// cell. A fixed light/dark cutoff misjudges the saturated mid-range colors,
+// which are the hardest to put either text color on.
 function textColorFor(value, min, max) {
   const L = luminance(rampRgb(value, min, max));
   const contrastWithWhite = 1.05 / (L + 0.05);
