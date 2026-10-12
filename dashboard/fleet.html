@@ -9,13 +9,13 @@
     --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
     --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
     --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
-    --cell-empty: #eee; --tooltip-bg: #1f3864;
+    --cell-empty: #eee; --tooltip-bg: #1f3864; --day-line: #6b7280;
   }
   html[data-theme="dark"] {
     --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
     --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
     --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
-    --cell-empty: #2a2f3a; --tooltip-bg: #374151;
+    --cell-empty: #2a2f3a; --tooltip-bg: #374151; --day-line: #9ca3af;
   }
   body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
   h1 { font-size: 20px; margin-bottom: 4px; }
@@ -62,6 +62,14 @@
   }
   table.heat td.node-label:hover { text-decoration: underline; color: var(--accent); }
   table.heat td.cell { height: 20px; text-align: center; cursor: pointer; border-radius: 2px; }
+  /* Operating-day band above the HE labels, and a divider at the start of each
+     new day running down through every row. */
+  table.heat th.day-head {
+    text-align: left; font-size: 12px; font-weight: 600; color: var(--text);
+    padding: 4px 6px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-bottom: 1px solid var(--border);
+  }
+  table.heat .day-start { border-left: 2px solid var(--day-line); }
   .weak-tail-flag { color: var(--caveat-border); font-size: 11px; margin-left: 4px; }
   .loading { color: var(--text-secondary); font-size: 13px; padding: 20px; }
   .tooltip {
@@ -121,6 +129,18 @@ function heInfo(iso) {
   const quarter = Math.floor(minute / 15);
   const key = `${date}-HE${he}`;
   return { operatingDay: date, he, quarter, key };
+}
+
+// '2026-10-13' -> 'Tue, Oct 13' (full) and 'Oct 13' (short, for narrow day groups)
+function dayHeaderText(dateStr) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric',
+  }).format(new Date(dateStr + 'T12:00:00Z'));
+}
+function dayShortText(dateStr) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC', month: 'short', day: 'numeric',
+  }).format(new Date(dateStr + 'T12:00:00Z'));
 }
 
 function showError(msg) {
@@ -207,8 +227,9 @@ async function loadFleet() {
     return { ...n, byHe };
   }).filter(n => n.byHe.size > 0);
 
-  // Column label shows the day only when it changes across the sorted
-  // column sequence, same decluttering as the detail chart's x-axis.
+  // Columns run in chronological order. Each column carries its operating day
+  // so render() can draw a day band above the HE labels and a divider where
+  // each new day starts.
   // Plain string sort breaks once HE hits double digits (e.g. "HE10" sorts
   // before "HE2" alphabetically) -- sort by date, then by the HE number
   // parsed as an integer, so the columns actually run in chronological order.
@@ -220,9 +241,9 @@ async function loadFleet() {
   let prevDay = null;
   heColumns = sortedKeys.map(key => {
     const [day, heStr] = [key.slice(0, 10), key.slice(11)];
-    const showDay = day !== prevDay;
-    if (showDay) prevDay = day;
-    return { key, label: showDay ? `${heStr}\n${day.slice(5)}` : heStr };
+    const dayStart = prevDay !== null && day !== prevDay; // first column of every day after the first
+    prevDay = day;
+    return { key, day, label: heStr, dayStart, tip: `${dayHeaderText(day)} ${heStr}` };
   });
 
   fleetData = withBuckets;
@@ -273,8 +294,23 @@ function render() {
   for (let i = 0; i < heColumns.length; i++) {
     html += `<col style="width:calc((100% - ${labelColWidth}) / ${heColumns.length})">`;
   }
-  html += '</colgroup><tr><th></th>';
-  for (const col of heColumns) html += `<th>${col.label}</th>`;
+  html += '</colgroup>';
+
+  // Day band: one header cell per operating day, spanning that day's columns.
+  const dayGroups = [];
+  for (const col of heColumns) {
+    const last = dayGroups[dayGroups.length - 1];
+    if (last && last.day === col.day) last.count++;
+    else dayGroups.push({ day: col.day, count: 1, dayStart: col.dayStart });
+  }
+  html += '<tr><th></th>';
+  for (const g of dayGroups) {
+    // Full "Tue, Oct 13" when there's room, shorter for narrow groups (the title shows it in full).
+    const text = g.count >= 5 ? dayHeaderText(g.day) : g.count >= 2 ? dayShortText(g.day) : String(parseInt(g.day.slice(8), 10));
+    html += `<th class="day-head${g.dayStart ? ' day-start' : ''}" colspan="${g.count}" title="${dayHeaderText(g.day)}">${text}</th>`;
+  }
+  html += '</tr><tr><th></th>';
+  for (const col of heColumns) html += `<th${col.dayStart ? ' class="day-start"' : ''}>${col.label}</th>`;
   html += '</tr>';
 
   for (const n of sorted) {
@@ -286,8 +322,8 @@ function render() {
       const val = cell ? cell[metric] : null;
       const bg = colorFor(val, min, max);
       const fg = val !== null ? textColorFor(val, min, max) : 'var(--text-secondary)';
-      const label = val !== null ? `${n.display_name} ${col.label.replace('\n', ' ')}: $${val.toFixed(0)}/MWh` : 'no data';
-      html += `<td class="cell" style="background:${bg};color:${fg}" onmousemove="showTip(event,'${label}')" onmouseleave="hideTip()" onclick="location.href='index.html?node=${n.node_id}'">${val !== null ? Math.round(val) : ''}</td>`;
+      const label = val !== null ? `${n.display_name} -- ${col.tip}: $${val.toFixed(0)}/MWh` : 'no data';
+      html += `<td class="cell${col.dayStart ? ' day-start' : ''}" style="background:${bg};color:${fg}" onmousemove="showTip(event,'${label}')" onmouseleave="hideTip()" onclick="location.href='index.html?node=${n.node_id}'">${val !== null ? Math.round(val) : ''}</td>`;
     }
     html += '</tr>';
   }
