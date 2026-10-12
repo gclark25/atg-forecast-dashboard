@@ -113,6 +113,7 @@
 
 <div class="view-toggle">
   <button id="btnFull" class="active">48-hour horizon (hourly)</button>
+  <button id="btnMid">Next few hours (15-min)</button>
   <button id="btnNear">Next 2 hours (5-min)</button>
 </div>
 
@@ -145,6 +146,7 @@ let currentNode = null;
 let chart = null;
 let currentData = null;
 // 'full' = hourly points across the whole forecast horizon
+// 'mid'  = 15-minute points for the next few hours
 // 'near' = 5-minute points for the next two hours
 let viewMode = 'full';
 
@@ -268,11 +270,14 @@ function chartPalette() {
 // all on one axis squeezes the near term into a lopsided stretch, so each view
 // uses ONE granularity:
 //   full -> the hourly points (every point stamped exactly on the hour)
+//   mid  -> the 15-minute grid (:00/:15/:30/:45) from now until the vendor
+//           switches to hourly; the quarter-hour points inside the 5-minute
+//           band are included so the spacing is uniform throughout
 //   near -> the 5-minute band, from now until that band ends
 // The 5-minute band is measured from when the forecast was ISSUED, and an
-// issued forecast is already some time old when it reaches the page, so "next
-// 2 hours" usually has less than two hours of 5-minute points left. The view
-// shows exactly what exists; the footer states the real span.
+// issued forecast is already some time old when it reaches the page, so the
+// short views usually have less runway left than their names suggest. Each
+// view shows exactly what exists; the footer states the real span.
 // Nothing is interpolated: every plotted point is a published forecast value.
 // ---------------------------------------------------------------------------
 // <chart-row-selection>
@@ -311,15 +316,38 @@ function selectNearRows(allRows, nowMs) {
   if (inWindow.length >= 2) return inWindow;
   return five.slice(-24);
 }
+
+// The 15-minute grid: points on :00/:15/:30/:45 from the front of the forecast,
+// stopping where the spacing jumps (to hourly). Subsampling the 5-minute band
+// keeps real published values only; nothing is interpolated.
+function selectQuarterHourRows(allRows) {
+  const grid = allRows.filter((r) => minuteOf(r.target_time) % 15 === 0);
+  const out = [];
+  for (let i = 0; i < grid.length; i++) {
+    if (i > 0 && timeOf(grid[i]) - timeOf(grid[i - 1]) > 15 * MINUTE_MS) break;
+    out.push(grid[i]);
+  }
+  return out;
+}
+
+// "Next few hours": everything on the 15-minute grid from now until the
+// vendor goes hourly. Falls back to the latest 15-minute points if almost
+// nothing is left (stale data, or the band is about to end).
+function selectQuarterRows(allRows, nowMs) {
+  const quarter = selectQuarterHourRows(allRows);
+  const upcoming = quarter.filter((r) => timeOf(r) >= nowMs);
+  if (upcoming.length >= 2) return upcoming;
+  return quarter.slice(-16);
+}
 // </chart-row-selection>
 
 // ---------------------------------------------------------------------------
 // Axis labels. Hourly view: "HE" labels on whole-hour multiples (every hour
 // when the chart is wide enough, otherwise every 2/3/4/6... hours, always
 // aligned to HE multiples so labels land on the same hours every time), with
-// a dashed divider and the date at each midnight. 5-minute view: plain
-// Central clock times (matching the tooltip), every point when there is room,
-// thinning to every 15/30/60 minutes on narrower charts.
+// a dashed divider and the date at each midnight. 15- and 5-minute views:
+// plain Central clock times (matching the tooltip), every point when there is
+// room, thinning to every 15/30/60 minutes on narrower charts.
 // ---------------------------------------------------------------------------
 // <chart-axis>
 function clockLabel(iso) {
@@ -345,7 +373,7 @@ function buildAxisInfo(rows, mode) {
     const info = heInfo(r.target_time);
     heList.push(info.he);
     minuteList.push(minuteOf(r.target_time));
-    labels.push(mode === 'near' ? clockLabel(r.target_time) : heShort(info));
+    labels.push(mode === 'full' ? heShort(info) : clockLabel(r.target_time));
     if (info.operatingDay !== prevDay) {
       marks.push({ index: i, text: dayHeaderText(info.operatingDay) });
       prevDay = info.operatingDay;
@@ -363,22 +391,24 @@ function hourStepFor(widthPx, nPoints) {
   return 24;
 }
 
-// Smallest label spacing (in minutes) for 5-minute points that leaves ~56px
-// per label: every point, else every 15, 30 or 60 minutes.
-function minuteStepFor(widthPx, nPoints) {
-  const pxPerPoint = widthPx / Math.max(1, nPoints - 1);
-  for (const step of [5, 15, 30, 60]) {
-    if (pxPerPoint * (step / 5) >= 56) return step;
+// Smallest label spacing (in minutes) that leaves ~56px per label, for points
+// spaced `spacingMin` minutes apart (5 or 15): every point if there is room,
+// else every 15, 30, 60... minutes.
+function minuteStepFor(widthPx, nPoints, spacingMin = 5) {
+  const pxPerMinute = widthPx / Math.max(1, nPoints - 1) / spacingMin;
+  for (const step of [5, 15, 30, 60, 120]) {
+    if (step >= spacingMin && pxPerMinute * step >= 56) return step;
   }
-  return 120;
+  return 240;
 }
 
 // Chart.js tick callback body (called with the scale as `this`).
 function axisTickLabel(scale, index, axis, mode, nPoints) {
   const label = scale.getLabelForValue(index);
   const width = scale.chart.chartArea ? scale.chart.chartArea.width : Math.max(300, scale.chart.width - 80);
-  if (mode === 'near') {
-    return axis.minuteList[index] % minuteStepFor(width, nPoints) === 0 ? label : '';
+  if (mode === 'near' || mode === 'mid') {
+    const spacingMin = mode === 'mid' ? 15 : 5;
+    return axis.minuteList[index] % minuteStepFor(width, nPoints, spacingMin) === 0 ? label : '';
   }
   return axis.heList[index] % hourStepFor(width, nPoints) === 0 ? label : '';
 }
@@ -417,30 +447,34 @@ const dayDividerPlugin = {
 function updateViewLabels() {
   const hours = currentData && currentData.source_meta && currentData.source_meta.horizon_hours;
   document.getElementById('btnFull').textContent = hours ? `${hours}-hour horizon (hourly)` : 'Full horizon (hourly)';
+  document.getElementById('btnMid').textContent = 'Next few hours (15-min)';
   document.getElementById('btnNear').textContent = 'Next 2 hours (5-min)';
 }
 
 function drawChart() {
   if (!currentData) return;
   const allRows = sortedRows(currentData.rows);
-  const near = viewMode === 'near';
-  const rows = near ? selectNearRows(allRows, Date.now()) : selectHourlyRows(allRows);
+  const grain = viewMode === 'near' ? '5-minute' : viewMode === 'mid' ? '15-minute' : 'hourly';
+  const dense = viewMode !== 'full'; // markers on every point only make sense when there are few of them
+  const rows = viewMode === 'near' ? selectNearRows(allRows, Date.now())
+    : viewMode === 'mid' ? selectQuarterRows(allRows, Date.now())
+    : selectHourlyRows(allRows);
   if (rows.length < 2) {
     if (chart) { chart.destroy(); chart = null; }
-    document.getElementById('chartMeta').textContent = `${currentData.display_name} (${currentData.node_id}) -- no ${near ? '5-minute' : 'hourly'} forecast points available`;
+    document.getElementById('chartMeta').textContent = `${currentData.display_name} (${currentData.node_id}) -- no ${grain} forecast points available`;
     return;
   }
   const axis = buildAxisInfo(rows, viewMode);
   const series = (key) => rows.map(r => r[key]);
   const pal = chartPalette();
   const fewPoints = rows.length <= 12;
-  const bandRadius = near && fewPoints ? 3 : 0;
+  const bandRadius = dense && fewPoints ? 3 : 0;
 
   const datasets = [
     { label: 'q95', data: series('q95'), borderColor: pal.q95, backgroundColor: pal.q95fill, fill: '+1', pointRadius: bandRadius },
     { label: 'q90', data: series('q90'), borderColor: pal.q90, backgroundColor: pal.q90fill, fill: '+1', pointRadius: bandRadius },
     { label: 'q75', data: series('q75'), borderColor: pal.q75, backgroundColor: pal.q75fill, fill: '+1', pointRadius: bandRadius },
-    { label: 'q50 (median)', data: series('q50'), borderColor: pal.q50, backgroundColor: pal.q50, pointRadius: near ? (fewPoints ? 4 : 3) : 2, borderWidth: 2 },
+    { label: 'q50 (median)', data: series('q50'), borderColor: pal.q50, backgroundColor: pal.q50, pointRadius: dense ? (fewPoints ? 4 : 3) : 2, borderWidth: 2 },
     { label: 'q25', data: series('q25'), borderColor: pal.q75, backgroundColor: 'transparent', fill: false, pointRadius: bandRadius },
     { label: 'q10', data: series('q10'), borderColor: pal.q90, backgroundColor: 'transparent', fill: false, pointRadius: bandRadius },
     { label: 'q05', data: series('q05'), borderColor: pal.q95, backgroundColor: 'transparent', fill: false, pointRadius: bandRadius },
@@ -480,7 +514,7 @@ function drawChart() {
 
   const first = rows[0];
   const last = rows[rows.length - 1];
-  let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} ${near ? '5-minute' : 'hourly'} points, ` +
+  let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} ${grain} points, ` +
     `${formatCtDateTime(first.target_time)} to ${formatCtDateTime(last.target_time)}`;
   if (currentData.source_meta) {
     const m = currentData.source_meta;
@@ -506,18 +540,13 @@ async function selectNode(nodeId) {
   updateChatContextLine();
 }
 
-document.getElementById('btnFull').onclick = () => {
-  viewMode = 'full';
-  document.getElementById('btnFull').classList.add('active');
-  document.getElementById('btnNear').classList.remove('active');
+const VIEW_BUTTONS = { full: 'btnFull', mid: 'btnMid', near: 'btnNear' };
+function setView(mode) {
+  viewMode = mode;
+  Object.entries(VIEW_BUTTONS).forEach(([m, id]) => document.getElementById(id).classList.toggle('active', m === mode));
   drawChart();
-};
-document.getElementById('btnNear').onclick = () => {
-  viewMode = 'near';
-  document.getElementById('btnNear').classList.add('active');
-  document.getElementById('btnFull').classList.remove('active');
-  drawChart();
-};
+}
+Object.entries(VIEW_BUTTONS).forEach(([mode, id]) => { document.getElementById(id).onclick = () => setView(mode); });
 
 document.getElementById('themeToggle').onclick = () => {
   const next = ATGTheme.toggle();
