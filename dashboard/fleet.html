@@ -35,7 +35,7 @@
   }
   .controls button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); margin-left: auto; }
-  .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #E6F1FB, #378ADD, #042C53); }
+  .legend-bar { width: 120px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #fee5d9, #fcbba1, #fc9272, #fb6a4a, #ef3b2c, #cb181d, #99000d); }
   .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); overflow-x: auto; }
   .error-box {
     background: var(--caveat-bg); border-left: 4px solid var(--caveat-border); color: var(--caveat-text);
@@ -254,22 +254,43 @@ async function loadFleet() {
   render();
 }
 
+// Sequential red ramp (ColorBrewer "Reds"): pale = low, deep red = high, so
+// the deeper the red, the higher the price. Same legend colors as the bar above.
+const RAMP_STOPS = [
+  [254, 229, 217], [252, 187, 161], [252, 146, 114],
+  [251, 106, 74], [239, 59, 44], [203, 24, 29], [153, 0, 13],
+];
+
+function rampRgb(value, min, max) {
+  const t = max > min ? (value - min) / (max - min) : 0;
+  const idx = Math.min(RAMP_STOPS.length - 2, Math.floor(t * (RAMP_STOPS.length - 1)));
+  const frac = t * (RAMP_STOPS.length - 1) - idx;
+  return RAMP_STOPS[idx].map((v, i) => Math.round(v + (RAMP_STOPS[idx + 1][i] - v) * frac));
+}
+
 function colorFor(value, min, max) {
   if (value === null || value === undefined) return 'var(--cell-empty)';
-  const t = max > min ? (value - min) / (max - min) : 0;
-  const stops = [
-    [230, 241, 251], [181, 212, 244], [133, 183, 235],
-    [55, 138, 221], [24, 95, 165], [12, 68, 124], [4, 44, 83],
-  ];
-  const idx = Math.min(stops.length - 2, Math.floor(t * (stops.length - 1)));
-  const frac = t * (stops.length - 1) - idx;
-  const c = stops[idx].map((v, i) => Math.round(v + (stops[idx + 1][i] - v) * frac));
+  const c = rampRgb(value, min, max);
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
+// WCAG relative luminance of an [r, g, b] color (0 = black, 1 = white)
+function luminance(rgb) {
+  const [r, g, b] = rgb.map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+// Number text is black or white, whichever has the higher contrast against the
+// cell. A fixed cutoff worked for the blue ramp but misjudges mid-range reds,
+// which are the hardest colors to put either text color on.
 function textColorFor(value, min, max) {
-  const t = max > min ? (value - min) / (max - min) : 0;
-  return t > 0.55 ? '#fff' : '#1f2937';
+  const L = luminance(rampRgb(value, min, max));
+  const contrastWithWhite = 1.05 / (L + 0.05);
+  const contrastWithBlack = (L + 0.05) / 0.05;
+  return contrastWithWhite > contrastWithBlack ? '#fff' : '#000';
 }
 
 function render() {
