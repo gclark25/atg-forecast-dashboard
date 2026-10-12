@@ -113,8 +113,8 @@
 
 <div class="view-toggle">
   <button id="btnFull" class="active">48-hour horizon (hourly)</button>
-  <button id="btnMid">Next few hours (15-min)</button>
-  <button id="btnNear">Next 2 hours (5-min)</button>
+  <button id="btnMid">4-hour horizon (15-min)</button>
+  <button id="btnNear">2-hour horizon (5-min)</button>
 </div>
 
 <div class="card">
@@ -146,8 +146,8 @@ let currentNode = null;
 let chart = null;
 let currentData = null;
 // 'full' = hourly points across the whole forecast horizon
-// 'mid'  = 15-minute points for the next few hours
-// 'near' = 5-minute points for the next two hours
+// 'mid'  = 15-minute points (the vendor's 4-hour horizon)
+// 'near' = 5-minute points (the vendor's 2-hour horizon)
 let viewMode = 'full';
 
 // ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
@@ -306,7 +306,7 @@ function selectFiveMinuteRows(allRows) {
   return out;
 }
 
-// "Next 2 hours": filtered by the real clock, not by the forecast's own
+// "2-hour horizon" view: filtered by the real clock, not by the forecast's own
 // origin, so a stale pull can't masquerade as a rolling window. If almost
 // nothing is left in the window (stale data, or the 5-minute band has run
 // out) it shows the latest 5-minute points it has rather than drawing nothing.
@@ -330,7 +330,7 @@ function selectQuarterHourRows(allRows) {
   return out;
 }
 
-// "Next few hours": everything on the 15-minute grid from now until the
+// "4-hour horizon" view: everything on the 15-minute grid from now until the
 // vendor goes hourly. Falls back to the latest 15-minute points if almost
 // nothing is left (stale data, or the band is about to end).
 function selectQuarterRows(allRows, nowMs) {
@@ -338,6 +338,19 @@ function selectQuarterRows(allRows, nowMs) {
   const upcoming = quarter.filter((r) => timeOf(r) >= nowMs);
   if (upcoming.length >= 2) return upcoming;
   return quarter.slice(-16);
+}
+
+// How far (in whole hours from when the forecast was issued) a view's
+// granularity reaches: the vendor's full horizon for the hourly view, or where
+// the 15-/5-minute band ends. Measured from the data rather than hard-coded, so
+// the tab names and footer follow the vendor if it ever changes its bands.
+// Returns null when it can't be measured (e.g. that band is already over).
+function viewHorizonHours(allRows, originIso, mode, sourceMeta) {
+  if (mode === 'full') return sourceMeta && sourceMeta.horizon_hours ? sourceMeta.horizon_hours : null;
+  const band = mode === 'near' ? selectFiveMinuteRows(allRows) : selectQuarterHourRows(allRows);
+  if (band.length < 2) return null;
+  const hours = (timeOf(band[band.length - 1]) - new Date(originIso).getTime()) / 3600000;
+  return hours > 0 ? Math.max(1, Math.round(hours)) : null;
 }
 // </chart-row-selection>
 
@@ -445,10 +458,13 @@ const dayDividerPlugin = {
 };
 
 function updateViewLabels() {
-  const hours = currentData && currentData.source_meta && currentData.source_meta.horizon_hours;
-  document.getElementById('btnFull').textContent = hours ? `${hours}-hour horizon (hourly)` : 'Full horizon (hourly)';
-  document.getElementById('btnMid').textContent = 'Next few hours (15-min)';
-  document.getElementById('btnNear').textContent = 'Next 2 hours (5-min)';
+  const horizonOf = (mode) => (currentData
+    ? viewHorizonHours(sortedRows(currentData.rows), currentData.origin_time, mode, currentData.source_meta)
+    : null);
+  const full = horizonOf('full');
+  document.getElementById('btnFull').textContent = full ? `${full}-hour horizon (hourly)` : 'Full horizon (hourly)';
+  document.getElementById('btnMid').textContent = `${horizonOf('mid') || 4}-hour horizon (15-min)`;
+  document.getElementById('btnNear').textContent = `${horizonOf('near') || 2}-hour horizon (5-min)`;
 }
 
 function drawChart() {
@@ -516,11 +532,12 @@ function drawChart() {
   const last = rows[rows.length - 1];
   let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} ${grain} points, ` +
     `${formatCtDateTime(first.target_time)} to ${formatCtDateTime(last.target_time)}`;
-  if (currentData.source_meta) {
-    const m = currentData.source_meta;
-    if (m.horizon_hours) metaStr += ` -- forecast horizon ${m.horizon_hours}h`;
-    if (m.issue_cadence_minutes) metaStr += `, issued every ${m.issue_cadence_minutes}min`;
-  }
+  const horizon = viewHorizonHours(allRows, currentData.origin_time, viewMode, currentData.source_meta);
+  const cadence = currentData.source_meta && currentData.source_meta.issue_cadence_minutes;
+  const facts = [];
+  if (horizon) facts.push(`forecast horizon ${horizon}h`);
+  if (cadence) facts.push(`issued every ${cadence}min`);
+  if (facts.length) metaStr += ` -- ${facts.join(', ')}`;
   metaStr += ` -- forecast issued ${formatCtDateTime(currentData.origin_time)}`;
   document.getElementById('chartMeta').textContent = metaStr;
 }
