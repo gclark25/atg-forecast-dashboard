@@ -112,8 +112,8 @@
 </div>
 
 <div class="view-toggle">
-  <button id="btn24h" class="active">24-hour horizon</button>
-  <button id="btn2h">Next 2 hours (15min)</button>
+  <button id="btnFull" class="active">48-hour horizon (hourly)</button>
+  <button id="btnNear">Next 2 hours (5-min)</button>
 </div>
 
 <div class="card">
@@ -144,7 +144,9 @@
 let currentNode = null;
 let chart = null;
 let currentData = null;
-let viewMode = '24h';
+// 'full' = hourly points across the whole forecast horizon
+// 'near' = 5-minute points for the next two hours
+let viewMode = 'full';
 
 // ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
 function ctParts(iso) {
@@ -247,81 +249,225 @@ function chartPalette() {
         q95: 'rgba(240,120,120,0.45)', q95fill: 'rgba(240,120,120,0.12)',
         q90: 'rgba(240,120,120,0.65)', q90fill: 'rgba(240,120,120,0.18)',
         q75: 'rgba(120,150,230,0.45)', q75fill: 'rgba(120,150,230,0.15)',
-        q50: '#8fb3ff', grid: 'rgba(255,255,255,0.08)', tick: '#9ca3af',
+        q50: '#8fb3ff', grid: 'rgba(255,255,255,0.08)', tick: '#9ca3af', divider: 'rgba(255,255,255,0.28)',
       }
     : {
         q95: 'rgba(192,0,0,0.3)', q95fill: 'rgba(192,0,0,0.08)',
         q90: 'rgba(192,0,0,0.5)', q90fill: 'rgba(192,0,0,0.12)',
         q75: 'rgba(31,56,100,0.3)', q75fill: 'rgba(31,56,100,0.10)',
-        q50: '#1f3864', grid: 'rgba(0,0,0,0.06)', tick: '#6b7280',
+        q50: '#1f3864', grid: 'rgba(0,0,0,0.06)', tick: '#6b7280', divider: 'rgba(0,0,0,0.25)',
       };
+}
+
+// ---------------------------------------------------------------------------
+// Which points each view draws.
+//
+// Metis 1 publishes each forecast in three bands: 5-minute points for roughly
+// the first two hours after the forecast is issued, 15-minute points out to
+// about four hours, then hourly points to the end of the horizon. Drawing them
+// all on one axis squeezes the near term into a lopsided stretch, so each view
+// uses ONE granularity:
+//   full -> the hourly points (every point stamped exactly on the hour)
+//   near -> the 5-minute band, from now until that band ends
+// The 5-minute band is measured from when the forecast was ISSUED, and an
+// issued forecast is already some time old when it reaches the page, so "next
+// 2 hours" usually has less than two hours of 5-minute points left. The view
+// shows exactly what exists; the footer states the real span.
+// Nothing is interpolated: every plotted point is a published forecast value.
+// ---------------------------------------------------------------------------
+// <chart-row-selection>
+const MINUTE_MS = 60 * 1000;
+// Central Time offsets are whole hours, so UTC minutes equal CT minutes.
+function minuteOf(iso) { return new Date(iso).getUTCMinutes(); }
+function timeOf(row) { return new Date(row.target_time).getTime(); }
+
+function sortedRows(rows) {
+  return [...rows].sort((a, b) => timeOf(a) - timeOf(b));
+}
+
+function selectHourlyRows(allRows) {
+  const hourly = allRows.filter((r) => minuteOf(r.target_time) === 0);
+  return hourly.length >= 2 ? hourly : allRows; // fallback if the vendor ever changes its stamping
+}
+
+// The 5-minute band: the unbroken run of points spaced 5 minutes apart from the
+// front of the forecast, stopping where the spacing jumps (to 15 minutes).
+function selectFiveMinuteRows(allRows) {
+  const out = [];
+  for (let i = 0; i < allRows.length; i++) {
+    if (i > 0 && timeOf(allRows[i]) - timeOf(allRows[i - 1]) > 5 * MINUTE_MS) break;
+    out.push(allRows[i]);
+  }
+  return out;
+}
+
+// "Next 2 hours": filtered by the real clock, not by the forecast's own
+// origin, so a stale pull can't masquerade as a rolling window. If almost
+// nothing is left in the window (stale data, or the 5-minute band has run
+// out) it shows the latest 5-minute points it has rather than drawing nothing.
+function selectNearRows(allRows, nowMs) {
+  const five = selectFiveMinuteRows(allRows);
+  const inWindow = five.filter((r) => timeOf(r) >= nowMs && timeOf(r) <= nowMs + 120 * MINUTE_MS);
+  if (inWindow.length >= 2) return inWindow;
+  return five.slice(-24);
+}
+// </chart-row-selection>
+
+// ---------------------------------------------------------------------------
+// Axis labels. Hourly view: "HE" labels on whole-hour multiples (every hour
+// when the chart is wide enough, otherwise every 2/3/4/6... hours, always
+// aligned to HE multiples so labels land on the same hours every time), with
+// a dashed divider and the date at each midnight. 5-minute view: plain
+// Central clock times (matching the tooltip), every point when there is room,
+// thinning to every 15/30/60 minutes on narrower charts.
+// ---------------------------------------------------------------------------
+// <chart-axis>
+function clockLabel(iso) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(new Date(iso));
+}
+
+// '2026-10-13' -> 'Tue, Oct 13'
+function dayHeaderText(dateStr) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric',
+  }).format(new Date(dateStr + 'T12:00:00Z'));
+}
+
+function buildAxisInfo(rows, mode) {
+  const labels = [];
+  const heList = [];
+  const minuteList = [];
+  const marks = [];
+  let prevDay = null;
+  rows.forEach((r, i) => {
+    const info = heInfo(r.target_time);
+    heList.push(info.he);
+    minuteList.push(minuteOf(r.target_time));
+    labels.push(mode === 'near' ? clockLabel(r.target_time) : heShort(info));
+    if (info.operatingDay !== prevDay) {
+      marks.push({ index: i, text: dayHeaderText(info.operatingDay) });
+      prevDay = info.operatingDay;
+    }
+  });
+  return { labels, heList, minuteList, marks };
+}
+
+// Smallest label spacing (in hours) that leaves ~48px per label.
+function hourStepFor(widthPx, nPoints) {
+  const pxPerHour = widthPx / Math.max(1, nPoints - 1);
+  for (const step of [1, 2, 3, 4, 6, 8, 12]) {
+    if (pxPerHour * step >= 48) return step;
+  }
+  return 24;
+}
+
+// Smallest label spacing (in minutes) for 5-minute points that leaves ~56px
+// per label: every point, else every 15, 30 or 60 minutes.
+function minuteStepFor(widthPx, nPoints) {
+  const pxPerPoint = widthPx / Math.max(1, nPoints - 1);
+  for (const step of [5, 15, 30, 60]) {
+    if (pxPerPoint * (step / 5) >= 56) return step;
+  }
+  return 120;
+}
+
+// Chart.js tick callback body (called with the scale as `this`).
+function axisTickLabel(scale, index, axis, mode, nPoints) {
+  const label = scale.getLabelForValue(index);
+  const width = scale.chart.chartArea ? scale.chart.chartArea.width : Math.max(300, scale.chart.width - 80);
+  if (mode === 'near') {
+    return axis.minuteList[index] % minuteStepFor(width, nPoints) === 0 ? label : '';
+  }
+  return axis.heList[index] % hourStepFor(width, nPoints) === 0 ? label : '';
+}
+// </chart-axis>
+
+// Draws the dashed day dividers and the date header above the plot area.
+const dayDividerPlugin = {
+  id: 'dayDividers',
+  beforeDatasetsDraw(chart, args, opts) {
+    const marks = (opts && opts.marks) || [];
+    if (!marks.length) return;
+    const { ctx, chartArea, scales } = chart;
+    ctx.save();
+    ctx.font = '600 11px -apple-system, Segoe UI, Arial, sans-serif';
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'left';
+    marks.forEach((m) => {
+      const px = scales.x.getPixelForValue(m.index);
+      if (m.index > 0) {
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = opts.lineColor;
+        ctx.moveTo(px, chartArea.top - 16);
+        ctx.lineTo(px, chartArea.bottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.fillStyle = opts.textColor;
+      ctx.fillText(m.text, px + 6, chartArea.top - 5);
+    });
+    ctx.restore();
+  },
+};
+
+function updateViewLabels() {
+  const hours = currentData && currentData.source_meta && currentData.source_meta.horizon_hours;
+  document.getElementById('btnFull').textContent = hours ? `${hours}-hour horizon (hourly)` : 'Full horizon (hourly)';
+  document.getElementById('btnNear').textContent = 'Next 2 hours (5-min)';
 }
 
 function drawChart() {
   if (!currentData) return;
-  const allRows = [...currentData.rows].sort((a, b) => new Date(a.target_time) - new Date(b.target_time));
-  // Filtered by actual current time, not by the forecast's own horizon_hours
-  // field -- that field is fixed relative to when the pull happened, so if
-  // the data is stale (or the first point just doesn't land on a clean hour),
-  // "next 2 hours" would silently mean "whatever's left of a 2h budget from
-  // an old origin," not a real rolling window. Falls back to the nearest
-  // available future points if the window itself is empty (very stale pull).
-  let rows = allRows;
-  if (viewMode === '2h') {
-    const now = Date.now();
-    const windowRows = allRows.filter(r => {
-      const t = new Date(r.target_time).getTime();
-      return t >= now && t <= now + 2 * 3600 * 1000;
-    });
-    rows = windowRows.length ? windowRows : allRows.filter(r => new Date(r.target_time).getTime() >= now).slice(0, 8);
+  const allRows = sortedRows(currentData.rows);
+  const near = viewMode === 'near';
+  const rows = near ? selectNearRows(allRows, Date.now()) : selectHourlyRows(allRows);
+  if (rows.length < 2) {
+    if (chart) { chart.destroy(); chart = null; }
+    document.getElementById('chartMeta').textContent = `${currentData.display_name} (${currentData.node_id}) -- no ${near ? '5-minute' : 'hourly'} forecast points available`;
+    return;
   }
-
-  // 24h view: label only on-the-hour points (declutters 94 points down to
-  // ~23 ticks); 2h view: label every point since there are only ~8.
-  let prevDay = null;
-  const labels = rows.map(r => {
-    const info = heInfo(r.target_time);
-    if (viewMode === '24h' && info.quarter !== 0) return '';
-    // 2h view matches the tooltip's plain-time convention (no HE prefix);
-    // 24h view keeps HE labels -- that's the operational framework for
-    // the wider horizon.
-    const mainLabel = viewMode === '2h'
-      ? new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(r.target_time))
-      : heShort(info);
-    const lines = [mainLabel];
-    if (info.operatingDay !== prevDay) { lines.push(info.operatingDay.slice(5)); prevDay = info.operatingDay; }
-    return lines;
-  });
+  const axis = buildAxisInfo(rows, viewMode);
   const series = (key) => rows.map(r => r[key]);
   const pal = chartPalette();
-  const pr = viewMode === '2h' ? 3 : 0;
+  const fewPoints = rows.length <= 12;
+  const bandRadius = near && fewPoints ? 3 : 0;
 
   const datasets = [
-    { label: 'q95', data: series('q95'), borderColor: pal.q95, backgroundColor: pal.q95fill, fill: '+1', pointRadius: pr },
-    { label: 'q90', data: series('q90'), borderColor: pal.q90, backgroundColor: pal.q90fill, fill: '+1', pointRadius: pr },
-    { label: 'q75', data: series('q75'), borderColor: pal.q75, backgroundColor: pal.q75fill, fill: '+1', pointRadius: pr },
-    { label: 'q50 (median)', data: series('q50'), borderColor: pal.q50, backgroundColor: 'transparent', pointRadius: viewMode === '2h' ? 4 : 0, borderWidth: 2 },
-    { label: 'q25', data: series('q25'), borderColor: pal.q75, backgroundColor: 'transparent', fill: false, pointRadius: pr },
-    { label: 'q10', data: series('q10'), borderColor: pal.q90, backgroundColor: 'transparent', fill: false, pointRadius: pr },
-    { label: 'q05', data: series('q05'), borderColor: pal.q95, backgroundColor: 'transparent', fill: false, pointRadius: pr },
+    { label: 'q95', data: series('q95'), borderColor: pal.q95, backgroundColor: pal.q95fill, fill: '+1', pointRadius: bandRadius },
+    { label: 'q90', data: series('q90'), borderColor: pal.q90, backgroundColor: pal.q90fill, fill: '+1', pointRadius: bandRadius },
+    { label: 'q75', data: series('q75'), borderColor: pal.q75, backgroundColor: pal.q75fill, fill: '+1', pointRadius: bandRadius },
+    { label: 'q50 (median)', data: series('q50'), borderColor: pal.q50, backgroundColor: pal.q50, pointRadius: near ? (fewPoints ? 4 : 3) : 2, borderWidth: 2 },
+    { label: 'q25', data: series('q25'), borderColor: pal.q75, backgroundColor: 'transparent', fill: false, pointRadius: bandRadius },
+    { label: 'q10', data: series('q10'), borderColor: pal.q90, backgroundColor: 'transparent', fill: false, pointRadius: bandRadius },
+    { label: 'q05', data: series('q05'), borderColor: pal.q95, backgroundColor: 'transparent', fill: false, pointRadius: bandRadius },
   ];
 
   if (chart) chart.destroy();
   chart = new Chart(document.getElementById('forecastChart'), {
     type: 'line',
-    data: { labels, datasets },
+    data: { labels: axis.labels, datasets },
+    plugins: [dayDividerPlugin],
     options: {
       responsive: true,
+      layout: { padding: { top: 22 } },
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: {
-          ticks: { autoSkip: true, maxTicksLimit: viewMode === '2h' ? 9 : 24, color: pal.tick },
+          ticks: {
+            autoSkip: false, maxRotation: 0, minRotation: 0, color: pal.tick,
+            callback: function (value, index) { return axisTickLabel(this, index, axis, viewMode, rows.length); },
+          },
           grid: { color: pal.grid },
         },
         y: { title: { display: true, text: '$/MWh', color: pal.tick }, ticks: { color: pal.tick }, grid: { color: pal.grid } },
       },
       plugins: {
         legend: { position: 'bottom', labels: { color: pal.tick } },
+        dayDividers: { marks: axis.marks, lineColor: pal.divider, textColor: pal.tick },
         tooltip: {
           callbacks: {
             title: (items) => formatCtDateTime(rows[items[0].dataIndex].target_time),
@@ -332,14 +478,16 @@ function drawChart() {
     },
   });
 
-  let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} intervals`;
-  if (rows.length) metaStr += ` starting ${formatCtDateTime(rows[0].target_time)}`;
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  let metaStr = `${currentData.display_name} (${currentData.node_id}) -- ${rows.length} ${near ? '5-minute' : 'hourly'} points, ` +
+    `${formatCtDateTime(first.target_time)} to ${formatCtDateTime(last.target_time)}`;
   if (currentData.source_meta) {
     const m = currentData.source_meta;
     if (m.horizon_hours) metaStr += ` -- forecast horizon ${m.horizon_hours}h`;
     if (m.issue_cadence_minutes) metaStr += `, issued every ${m.issue_cadence_minutes}min`;
   }
-  metaStr += ` -- pull issued ${formatCtDateTime(currentData.origin_time)}`;
+  metaStr += ` -- forecast issued ${formatCtDateTime(currentData.origin_time)}`;
   document.getElementById('chartMeta').textContent = metaStr;
 }
 
@@ -353,20 +501,21 @@ async function selectNode(nodeId) {
     return;
   }
   document.getElementById('tailCaveat').classList.toggle('show', !!currentData.weak_tail_node);
+  updateViewLabels();
   drawChart();
   updateChatContextLine();
 }
 
-document.getElementById('btn24h').onclick = () => {
-  viewMode = '24h';
-  document.getElementById('btn24h').classList.add('active');
-  document.getElementById('btn2h').classList.remove('active');
+document.getElementById('btnFull').onclick = () => {
+  viewMode = 'full';
+  document.getElementById('btnFull').classList.add('active');
+  document.getElementById('btnNear').classList.remove('active');
   drawChart();
 };
-document.getElementById('btn2h').onclick = () => {
-  viewMode = '2h';
-  document.getElementById('btn2h').classList.add('active');
-  document.getElementById('btn24h').classList.remove('active');
+document.getElementById('btnNear').onclick = () => {
+  viewMode = 'near';
+  document.getElementById('btnNear').classList.add('active');
+  document.getElementById('btnFull').classList.remove('active');
   drawChart();
 };
 
@@ -456,8 +605,10 @@ function buildChatContext() {
   };
   const p50 = peakOf('q50');
   const p95 = peakOf('q95');
+  const times = currentData.rows.map((r) => r.target_time).sort();
   let ctx = `[Dashboard context -- node ${currentData.node_id} (${currentData.display_name}), ERCOT. ` +
-    `On screen: Metis 1 Preview forecast issued ${formatCtDateTime(currentData.origin_time)}, ${currentData.rows.length} 15-minute intervals.`;
+    `On screen: Metis 1 Preview forecast issued ${formatCtDateTime(currentData.origin_time)}, ` +
+    `covering ${formatCtDateTime(times[0])} to ${formatCtDateTime(times[times.length - 1])}.`;
   if (p50) ctx += ` Median (q50) peaks at $${p50.q50.toFixed(0)}/MWh around ${formatCtDateTime(p50.target_time)}.`;
   if (p95) ctx += ` q95 peaks at $${p95.q95.toFixed(0)}/MWh around ${formatCtDateTime(p95.target_time)}.`;
   return ctx + ' All times Central.]\n\n';
