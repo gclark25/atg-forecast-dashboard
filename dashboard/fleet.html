@@ -9,12 +9,14 @@
     --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
     --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
     --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
+    --warn-bg: #fff4e0; --warn-border: #b45309; --warn-text: #1f2937;
     --cell-empty: #eee; --tooltip-bg: #1f3864; --day-line: #6b7280;
   }
   html[data-theme="dark"] {
     --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
     --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
     --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
+    --warn-bg: #3a2a12; --warn-border: #f0a04b; --warn-text: #f5e6cc;
     --cell-empty: #2a2f3a; --tooltip-bg: #374151; --day-line: #9ca3af;
   }
   body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
@@ -43,6 +45,18 @@
     font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
+  /* Forecast vintage: warning banner, one-line summary, collapsible history. */
+  .stale-banner {
+    background: var(--warn-bg); border-left: 4px solid var(--warn-border); color: var(--warn-text);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px; line-height: 1.5; margin-bottom: 14px; display: none;
+  }
+  .stale-banner.show { display: block; }
+  .vintage-line { font-size: 12px; color: var(--text-secondary); margin: 0 0 8px; }
+  .vintage-details { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; display: none; }
+  .vintage-details summary { cursor: pointer; color: var(--accent); }
+  .vintage-details ul { margin: 6px 0 10px 18px; padding: 0; }
+  .vintage-details .vh-title { margin-top: 8px; font-weight: 600; color: var(--text); }
+  .vintage-details .vh-gap { color: var(--warn-border); font-weight: 600; }
   /* table-layout:fixed + no width:100% so the browser doesn't dump all
      leftover space into the one column without an explicit width (the
      label column) -- that was the cause of the big gap before the grid. */
@@ -94,6 +108,13 @@
 
 <div class="error-box" id="errorBox"></div>
 
+<div class="stale-banner" id="staleBanner"></div>
+<div class="vintage-line" id="vintageLine"></div>
+<details class="vintage-details" id="vintageDetails">
+  <summary>Forecast version history</summary>
+  <div id="vintageHistory"></div>
+</details>
+
 <div class="controls">
   <button id="btnMedian" class="active">Median (q50)</button>
   <button id="btnTail">Tail risk (q95)</button>
@@ -108,6 +129,8 @@
 
 <script>
 let metric = 'q50';
+let runStatus = null;    // data/run_status.json (model + vintage history, once the Worker writes it)
+let fleetVintage = null; // worked out from the node files each time the fleet loads
 let fleetData = []; // [{node_id, display_name, weak_tail_node, byHe: Map(heKey -> {q50,q95,operatingDay,he})}]
 let heColumns = []; // ordered list of {key, label}
 
@@ -181,10 +204,13 @@ async function loadLastUpdated() {
   try {
     const data = await fetchJson('data/run_status.json');
     lastUpdatedIso = data.generated_at;
+    runStatus = data;
   } catch (e) {
     lastUpdatedIso = null;
+    runStatus = null;
   }
   renderLastUpdated();
+  renderVintage();
 }
 
 async function loadFleet() {
@@ -200,7 +226,7 @@ async function loadFleet() {
   const results = await Promise.all(manifest.map(async (m) => {
     try {
       const data = await fetchJson(`data/${m.node_id}_latest.json`);
-      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: data.rows || [] };
+      return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, origin_time: data.origin_time, source_meta: data.source_meta, rows: data.rows || [] };
     } catch (e) {
       return { node_id: m.node_id, display_name: m.display_name, weak_tail_node: m.weak_tail_node, rows: [], loadError: e.message };
     }
@@ -247,11 +273,145 @@ async function loadFleet() {
   });
 
   fleetData = withBuckets;
+  fleetVintage = computeFleetVintage(withBuckets);
 
   document.getElementById('subtitle').textContent =
     `${fleetData.length} nodes with live data -- columns are real ERCOT Hour-Ending intervals, Central Time`;
 
   render();
+  renderVintage();
+}
+
+// ---------------------------------------------------------------------------
+// Forecast vintage. Metis issues a new forecast every `issue_cadence_minutes`
+// (60 at the moment). If the newest one is more than two cadences old, newer
+// vintages are missing upstream; the page says so rather than presenting an old
+// forecast as current. The history list comes from run_status.json (written by
+// the Worker): which model builds this dashboard has seen, and when each
+// forecast issue time was first seen, with any gaps flagged.
+// ---------------------------------------------------------------------------
+// <fleet-vintage>
+function formatAge(minutes) {
+  if (typeof minutes !== 'number' || !isFinite(minutes)) return 'unknown';
+  const m = Math.max(0, Math.round(minutes));
+  if (m < 1) return 'under 1m';
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return h === 0 ? `${mm}m` : `${h}h ${String(mm).padStart(2, '0')}m`;
+}
+
+function fmtCt(iso) {
+  if (!iso) return 'unknown';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'unknown';
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(d) + ' CT';
+}
+
+function computeFleetVintage(nodes) {
+  const items = nodes
+    .filter((n) => n.rows && n.rows.length)
+    .map((n) => {
+      const meta = n.source_meta || {};
+      return {
+        issued: meta.issued_at || n.origin_time || null,
+        cadence: Number(meta.issue_cadence_minutes) > 0 ? Number(meta.issue_cadence_minutes) : 60,
+        meta,
+      };
+    })
+    .filter((x) => x.issued);
+  if (!items.length) return null;
+  const issued = items.map((x) => x.issued).sort();
+  const tally = new Map();
+  for (const x of items) {
+    const k = [x.meta.model_id, x.meta.model_version, x.meta.model_hash].join('|');
+    const e = tally.get(k) || { count: 0, meta: x.meta };
+    e.count++;
+    tally.set(k, e);
+  }
+  let model = null;
+  for (const e of tally.values()) if (!model || e.count > model.count) model = e;
+  return { issued, newestIso: issued[issued.length - 1], oldestIso: issued[0], cadence: items[0].cadence, total: items.length, model: model ? model.meta : null };
+}
+
+function vintageView(v, nowMs) {
+  const ageOf = (iso) => (nowMs - new Date(iso).getTime()) / 60000;
+  const limit = 2 * v.cadence;
+  const newestAge = ageOf(v.newestIso);
+  const oldestAge = ageOf(v.oldestIso);
+  const olderNodes = v.issued.filter((iso) => ageOf(iso) > limit).length;
+  let line = `Forecast vintage: newest issued ${fmtCt(v.newestIso)} (${formatAge(newestAge)} ago)`;
+  if (v.oldestIso !== v.newestIso) line += `; oldest node ${fmtCt(v.oldestIso)} (${formatAge(oldestAge)} ago)`;
+  const m = v.model || {};
+  const bits = [m.display_name, m.model_id, m.model_version ? `build ${m.model_version}` : null].filter(Boolean);
+  if (bits.length) line += ` -- model: ${bits.join(', ')}`;
+  let banner = '';
+  if (newestAge > limit) {
+    const missed = Math.floor(newestAge / v.cadence);
+    banner = `Stale forecasts: the newest vintage across all ${v.total} nodes was issued ${fmtCt(v.newestIso)}, ${formatAge(newestAge)} ago. ` +
+      `Metis normally refreshes every ${v.cadence} min, so about ${missed} newer ${missed === 1 ? 'vintage' : 'vintages'} should exist. The heat map below shows that older forecast.`;
+  } else if (olderNodes > 0) {
+    banner = `${olderNodes} of ${v.total} nodes are on a forecast older than ${formatAge(limit)}; the rest are current.`;
+  }
+  return { line, banner };
+}
+// </fleet-vintage>
+
+function renderVintage() {
+  const bannerEl = document.getElementById('staleBanner');
+  const lineEl = document.getElementById('vintageLine');
+  if (!fleetVintage) {
+    bannerEl.textContent = ''; bannerEl.classList.remove('show'); lineEl.textContent = '';
+  } else {
+    const view = vintageView(fleetVintage, Date.now());
+    lineEl.textContent = view.line;
+    bannerEl.textContent = view.banner;
+    bannerEl.classList.toggle('show', !!view.banner);
+  }
+  renderVintageHistory();
+}
+
+function renderVintageHistory() {
+  const detailsEl = document.getElementById('vintageDetails');
+  const box = document.getElementById('vintageHistory');
+  const models = runStatus && runStatus.model && Array.isArray(runStatus.model.history) ? runStatus.model.history : [];
+  const log = runStatus && Array.isArray(runStatus.vintage_log) ? runStatus.vintage_log : [];
+  if (!models.length && !log.length) { detailsEl.style.display = 'none'; return; }
+  detailsEl.style.display = 'block';
+  box.innerHTML = '';
+  const add = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; return e; };
+
+  if (models.length) {
+    box.appendChild(add('div', 'Model builds this dashboard has seen', 'vh-title'));
+    const ul = document.createElement('ul');
+    for (const h of models) {
+      const name = [h.display_name, h.model_id].filter(Boolean).join(' / ') || 'unknown model';
+      ul.appendChild(add('li', `${name}${h.model_version ? ' -- build ' + h.model_version : ''}: first seen ${fmtCt(h.first_seen_at)}`));
+    }
+    box.appendChild(ul);
+  }
+  if (log.length) {
+    box.appendChild(add('div', 'Recent forecast vintages (newest first)', 'vh-title'));
+    const cadence = (fleetVintage && fleetVintage.cadence) || 60;
+    const ul = document.createElement('ul');
+    log.slice(0, 12).forEach((e, i) => {
+      const li = add('li', `issued ${fmtCt(e.issued_at)} -- first seen by this dashboard ${fmtCt(e.first_seen_at)}`);
+      const lag = (new Date(e.first_seen_at) - new Date(e.issued_at)) / 60000;
+      if (isFinite(lag) && lag >= 0) li.textContent += ` (${formatAge(lag)} after issue)`;
+      const next = log[i + 1];
+      if (next) {
+        const gap = (new Date(e.issued_at) - new Date(next.issued_at)) / 60000;
+        if (gap > 1.5 * cadence) {
+          const missing = Math.round(gap / cadence) - 1;
+          li.appendChild(add('span', ` -- ${formatAge(gap)} after the previous one: ${missing} ${missing === 1 ? 'vintage' : 'vintages'} missing`, 'vh-gap'));
+        }
+      }
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+    box.appendChild(add('div', 'This history starts when this version was deployed; earlier vintages are not listed.'));
+  }
 }
 
 // Heat palette: blue = low, red = high.
@@ -397,6 +557,7 @@ document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ?
 loadFleet();
 loadLastUpdated();
 setInterval(renderLastUpdated, 30000); // re-render "X min ago" without refetching
+setInterval(renderVintage, 30000);     // forecast age keeps growing between refreshes
 
 // Checks run_status.json every 2 minutes -- cheap single-key read, well
 // within KV's free read quota even polled this often. Only re-fetches and

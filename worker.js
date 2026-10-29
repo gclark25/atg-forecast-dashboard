@@ -54,12 +54,31 @@ async function getLatestForecast(nodeId, apiKey, horizonHours = 48) {
   });
 }
 
-function selectMetisSeries(raw) {
-  const series = raw.series || [];
-  for (const s of series) {
+// Every series on the response that looks like a Metis forecast.
+function metisCandidates(raw) {
+  return (raw.series || []).filter((s) => {
     const src = s.source || {};
     const name = ['id', 'shortName', 'displayName', 'modelId'].map((k) => String(src[k] || '')).join(' ').toLowerCase();
-    if (name.includes(SOURCE_MATCH)) return s;
+    return name.includes(SOURCE_MATCH);
+  });
+}
+
+// Which series to show. If the API ever returns more than one Metis series for
+// a node (a second model build, say), take the newest usable one instead of
+// whichever happens to be listed first: usable = status 'ready' with points,
+// newest = latest issuedAt. A single candidate is chosen exactly as before.
+function selectMetisSeries(raw) {
+  const series = raw.series || [];
+  const candidates = metisCandidates(raw);
+  if (candidates.length) {
+    const usable = (s) => (s.status === undefined || s.status === 'ready') && Array.isArray(s.points) && s.points.length > 0;
+    return [...candidates].sort((a, b) => {
+      if (usable(a) !== usable(b)) return usable(a) ? -1 : 1;
+      const ai = a.issuedAt || '';
+      const bi = b.issuedAt || '';
+      if (ai !== bi) return ai > bi ? -1 : 1; // newest issue time first
+      return 0; // tie: keep the API's order
+    })[0];
   }
   return series.length ? series[0] : null;
 }
@@ -101,12 +120,115 @@ function extractSeriesMeta(raw) {
   const series = selectMetisSeries(raw);
   if (!series) return null;
   const src = series.source || {};
-  return {
+  const meta = {
     display_name: src.displayName ?? null,
     model_id: src.modelId ?? null,
     horizon_hours: src.horizonHours ?? null,
     issue_cadence_minutes: src.issueCadenceMinutes ?? null,
     resolution_minutes: src.resolutionMinutes ?? null,
+    // Which model build and which forecast run this is, so the pages can say so:
+    source_id: src.id ?? null,
+    model_version: series.modelVersion ?? null,
+    model_hash: series.modelHash ?? null,
+    issued_at: series.issuedAt ?? null,
+    mirror_updated_at: series.mirrorUpdatedAt ?? null,
+    series_status: series.status ?? null,
+  };
+  const passedOver = metisCandidates(raw).filter((s) => s !== series);
+  if (passedOver.length) {
+    meta.alternatives = passedOver.map((s) => ({
+      source_id: (s.source || {}).id ?? null,
+      model_id: (s.source || {}).modelId ?? null,
+      model_version: s.modelVersion ?? null,
+      issued_at: s.issuedAt ?? null,
+      status: s.status ?? null,
+    }));
+  }
+  return meta;
+}
+
+// ---- Model-version and forecast-vintage history ----
+//
+// Rides inside run_status, which is already written every run, so it costs no
+// extra KV write. Two things are kept:
+//   model.history -- every distinct model build this dashboard has seen
+//   vintage_log   -- recent forecast issue times and when we first saw each, so
+//                    missing vintages and publishing delay are visible after the
+//                    fact. (Not the full forecast history; just the timeline.)
+// If a run gets no data at all, the previous history is carried forward as it
+// was instead of being wiped.
+const MODEL_HISTORY_MAX = 20;
+const VINTAGE_LOG_MAX = 48;
+
+function modelKey(m) {
+  return [m.source_id, m.model_id, m.model_version, m.model_hash].map((v) => (v == null ? '' : String(v))).join('|');
+}
+
+function buildRunStatus(prev, allLatest, nowIso) {
+  const prevModel = prev && prev.model && typeof prev.model === 'object' ? prev.model : {};
+  const nodes = Object.values(allLatest);
+
+  // The model build the fleet is on: the most common one across nodes.
+  const tally = new Map();
+  for (const n of nodes) {
+    const m = n.source_meta;
+    if (!m || (!m.model_id && !m.model_version && !m.source_id)) continue;
+    const k = modelKey(m);
+    const e = tally.get(k) || { count: 0, meta: m };
+    e.count++;
+    tally.set(k, e);
+  }
+  let current = null;
+  for (const e of tally.values()) {
+    if (!current || e.count > current.nodes) {
+      current = {
+        source_id: e.meta.source_id ?? null,
+        display_name: e.meta.display_name ?? null,
+        model_id: e.meta.model_id ?? null,
+        model_version: e.meta.model_version ?? null,
+        model_hash: e.meta.model_hash ?? null,
+        nodes: e.count,
+      };
+    }
+  }
+
+  let history = Array.isArray(prevModel.history) ? prevModel.history.slice() : [];
+  if (current && (!history.length || modelKey(history[0]) !== modelKey(current))) {
+    history.unshift({
+      first_seen_at: nowIso,
+      source_id: current.source_id,
+      display_name: current.display_name,
+      model_id: current.model_id,
+      model_version: current.model_version,
+      model_hash: current.model_hash,
+    });
+  }
+  history = history.slice(0, MODEL_HISTORY_MAX);
+
+  // Forecast issue times across the fleet.
+  const issued = nodes
+    .map((n) => ({
+      at: (n.source_meta && n.source_meta.issued_at) || n.origin_time || null,
+      mirror: (n.source_meta && n.source_meta.mirror_updated_at) || null,
+    }))
+    .filter((x) => x.at)
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const newest = issued.length ? issued[issued.length - 1] : null;
+
+  let log = Array.isArray(prev && prev.vintage_log) ? prev.vintage_log.slice() : [];
+  if (newest && !log.some((v) => v.issued_at === newest.at)) {
+    log.push({ issued_at: newest.at, first_seen_at: nowIso, mirror_updated_at: newest.mirror });
+  }
+  log.sort((a, b) => (a.issued_at < b.issued_at ? 1 : a.issued_at > b.issued_at ? -1 : 0)); // newest first
+  log = log.slice(0, VINTAGE_LOG_MAX);
+
+  return {
+    generated_at: nowIso,
+    model: { current: current || prevModel.current || null, history },
+    vintage: newest
+      ? { newest_issued_at: newest.at, oldest_issued_at: issued[0].at, nodes: issued.length, newest_mirror_updated_at: newest.mirror }
+      : (prev && prev.vintage) || null,
+    vintage_log: log,
   };
 }
 
@@ -191,10 +313,22 @@ async function pullAndStore(env) {
   }
   const manifest = results.map((r) => r.manifestEntry);
 
+  let prevStatus = null;
+  try {
+    prevStatus = await env.FORECASTS_KV.get('run_status', 'json');
+  } catch (e) {
+    console.log('pullAndStore: could not read the previous run_status; its history starts fresh:', e.message || e);
+  }
+  const runStatus = buildRunStatus(prevStatus, allLatest, new Date().toISOString());
+  if (runStatus.vintage) {
+    const ageMin = Math.round((Date.now() - new Date(runStatus.vintage.newest_issued_at).getTime()) / 60000);
+    console.log(`pullAndStore: newest forecast vintage issued ${runStatus.vintage.newest_issued_at} (${ageMin} min old), model ${runStatus.model.current ? runStatus.model.current.model_id + ' ' + runStatus.model.current.model_version : 'unknown'}`);
+  }
+
   console.log('pullAndStore: writing allLatest + manifest + run_status, node results:', manifest.map(m => `${m.node_id}:${m.rows_pulled}${m.error ? '(' + m.error + ')' : ''}`).join(', '));
   await env.FORECASTS_KV.put('allLatest', JSON.stringify(allLatest));
   await env.FORECASTS_KV.put('manifest', JSON.stringify(manifest));
-  await env.FORECASTS_KV.put('run_status', JSON.stringify({ generated_at: new Date().toISOString() }));
+  await env.FORECASTS_KV.put('run_status', JSON.stringify(runStatus));
   console.log('pullAndStore: done');
 }
 

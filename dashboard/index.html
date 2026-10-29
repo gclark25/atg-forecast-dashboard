@@ -10,11 +10,13 @@
     --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
     --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
     --accent2: #0f6e56; --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
+    --warn-bg: #fff4e0; --warn-border: #b45309; --warn-text: #1f2937;
   }
   html[data-theme="dark"] {
     --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
     --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
     --accent2: #2dd4bf; --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
+    --warn-bg: #3a2a12; --warn-border: #f0a04b; --warn-text: #f5e6cc;
   }
   body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
   h1 { font-size: 20px; margin-bottom: 4px; }
@@ -50,6 +52,12 @@
     font-family: monospace; white-space: pre-wrap;
   }
   .error-box.show { display: block; }
+  /* Shown when the newest forecast we have is more than two issue cycles old. */
+  .stale-banner {
+    background: var(--warn-bg); border-left: 4px solid var(--warn-border); color: var(--warn-text);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px; line-height: 1.5; margin-bottom: 16px; display: none;
+  }
+  .stale-banner.show { display: block; }
   .meta { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
   canvas { max-height: 420px; }
   a { color: var(--accent); }
@@ -111,6 +119,8 @@
   off it directly.
 </div>
 
+<div class="stale-banner" id="staleBanner"></div>
+
 <div class="view-toggle">
   <button id="btnFull" class="active">48-hour horizon (hourly)</button>
   <button id="btnMid">4-hour horizon (15-min)</button>
@@ -149,6 +159,8 @@ let currentData = null;
 // 'mid'  = 15-minute points (the vendor's 4-hour horizon)
 // 'near' = 5-minute points (the vendor's 2-hour horizon)
 let viewMode = 'full';
+let footerBase = '';        // footer text that doesn't change with the clock
+let lastDrawnStale = false; // whether the chart was last drawn for a stale forecast
 
 // ---- ERCOT Hour-Ending labeling, Central Time, DST-safe via Intl ----
 function ctParts(iso) {
@@ -310,11 +322,14 @@ function selectFiveMinuteRows(allRows) {
 // origin, so a stale pull can't masquerade as a rolling window. If almost
 // nothing is left in the window (stale data, or the 5-minute band has run
 // out) it shows the latest 5-minute points it has rather than drawing nothing.
-function selectNearRows(allRows, nowMs) {
+// allowFallback=false (the page passes this when the forecast is stale): those
+// "latest points" are already in the past, so show nothing rather than old
+// numbers on a live-looking axis.
+function selectNearRows(allRows, nowMs, allowFallback = true) {
   const five = selectFiveMinuteRows(allRows);
   const inWindow = five.filter((r) => timeOf(r) >= nowMs && timeOf(r) <= nowMs + 120 * MINUTE_MS);
   if (inWindow.length >= 2) return inWindow;
-  return five.slice(-24);
+  return allowFallback ? five.slice(-24) : [];
 }
 
 // The 15-minute grid: points on :00/:15/:30/:45 from the front of the forecast,
@@ -333,11 +348,11 @@ function selectQuarterHourRows(allRows) {
 // "4-hour horizon" view: everything on the 15-minute grid from now until the
 // vendor goes hourly. Falls back to the latest 15-minute points if almost
 // nothing is left (stale data, or the band is about to end).
-function selectQuarterRows(allRows, nowMs) {
+function selectQuarterRows(allRows, nowMs, allowFallback = true) {
   const quarter = selectQuarterHourRows(allRows);
   const upcoming = quarter.filter((r) => timeOf(r) >= nowMs);
   if (upcoming.length >= 2) return upcoming;
-  return quarter.slice(-16);
+  return allowFallback ? quarter.slice(-16) : [];
 }
 
 // How far (in whole hours from when the forecast was issued) a view's
@@ -353,6 +368,41 @@ function viewHorizonHours(allRows, originIso, mode, sourceMeta) {
   return hours > 0 ? Math.max(1, Math.round(hours)) : null;
 }
 // </chart-row-selection>
+
+// ---------------------------------------------------------------------------
+// Forecast age. Metis issues a new forecast every `issue_cadence_minutes` (60
+// at the moment). When the newest one we have is more than two cadences old,
+// newer vintages are missing upstream. The page then says so, instead of
+// drawing old numbers as if they were live, and the 15-/5-minute tabs stop
+// falling back to points that are already in the past.
+// ---------------------------------------------------------------------------
+// <vintage-info>
+function formatAge(minutes) {
+  if (typeof minutes !== 'number' || !isFinite(minutes)) return 'unknown';
+  const m = Math.max(0, Math.round(minutes));
+  if (m < 1) return 'under 1m';
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return h === 0 ? `${mm}m` : `${h}h ${String(mm).padStart(2, '0')}m`;
+}
+
+function vintageInfo(data, nowMs) {
+  const meta = (data && data.source_meta) || {};
+  const issuedIso = meta.issued_at || (data && data.origin_time) || null;
+  if (!issuedIso) return null;
+  const issuedMs = new Date(issuedIso).getTime();
+  if (isNaN(issuedMs)) return null;
+  const cadence = Number(meta.issue_cadence_minutes) > 0 ? Number(meta.issue_cadence_minutes) : 60;
+  const ageMin = Math.max(0, (nowMs - issuedMs) / 60000);
+  return { issuedIso, ageMin, cadence, limitMin: 2 * cadence, stale: ageMin > 2 * cadence, missed: Math.floor(ageMin / cadence) };
+}
+
+function staleBannerText(v, data) {
+  const name = (data && data.source_meta && data.source_meta.display_name) || 'forecast';
+  return `Stale forecast: the newest ${name} for this node was issued ${formatCtDateTime(v.issuedIso)}, ${formatAge(v.ageMin)} ago. ` +
+    `It normally refreshes every ${v.cadence} min, so about ${v.missed} newer ${v.missed === 1 ? 'vintage' : 'vintages'} should exist. Treat these numbers as out of date.`;
+}
+// </vintage-info>
 
 // ---------------------------------------------------------------------------
 // Axis labels. Hourly view: "HE" labels on whole-hour multiples (every hour
@@ -472,12 +522,19 @@ function drawChart() {
   const allRows = sortedRows(currentData.rows);
   const grain = viewMode === 'near' ? '5-minute' : viewMode === 'mid' ? '15-minute' : 'hourly';
   const dense = viewMode !== 'full'; // markers on every point only make sense when there are few of them
-  const rows = viewMode === 'near' ? selectNearRows(allRows, Date.now())
-    : viewMode === 'mid' ? selectQuarterRows(allRows, Date.now())
+  const vint = vintageInfo(currentData, Date.now());
+  lastDrawnStale = !!(vint && vint.stale);
+  renderStaleBanner();
+  const allowFallback = !lastDrawnStale; // stale: never substitute points that are already in the past
+  const rows = viewMode === 'near' ? selectNearRows(allRows, Date.now(), allowFallback)
+    : viewMode === 'mid' ? selectQuarterRows(allRows, Date.now(), allowFallback)
     : selectHourlyRows(allRows);
   if (rows.length < 2) {
     if (chart) { chart.destroy(); chart = null; }
-    document.getElementById('chartMeta').textContent = `${currentData.display_name} (${currentData.node_id}) -- no ${grain} forecast points available`;
+    footerBase = '';
+    document.getElementById('chartMeta').textContent = lastDrawnStale
+      ? `${currentData.display_name} (${currentData.node_id}) -- no current ${grain} points: the newest forecast was issued ${formatCtDateTime(vint.issuedIso)} (${formatAge(vint.ageMin)} ago) and has no ${grain} points left ahead of now. Waiting for a newer vintage.`
+      : `${currentData.display_name} (${currentData.node_id}) -- no ${grain} forecast points available`;
     return;
   }
   const axis = buildAxisInfo(rows, viewMode);
@@ -538,8 +595,39 @@ function drawChart() {
   if (horizon) facts.push(`forecast horizon ${horizon}h`);
   if (cadence) facts.push(`issued every ${cadence}min`);
   if (facts.length) metaStr += ` -- ${facts.join(', ')}`;
-  metaStr += ` -- forecast issued ${formatCtDateTime(currentData.origin_time)}`;
-  document.getElementById('chartMeta').textContent = metaStr;
+  footerBase = metaStr;
+  renderFooter();
+}
+
+// The part of the footer that follows the clock (forecast age) and names the
+// model build the numbers came from.
+function vintageFooterTail(data) {
+  const v = vintageInfo(data, Date.now());
+  const meta = (data && data.source_meta) || {};
+  let s = '';
+  if (v) s += ` -- forecast issued ${formatCtDateTime(v.issuedIso)} (${formatAge(v.ageMin)} ago)`;
+  else if (data && data.origin_time) s += ` -- forecast issued ${formatCtDateTime(data.origin_time)}`;
+  const model = [meta.display_name, meta.model_id, meta.model_version ? `build ${meta.model_version}` : null].filter(Boolean);
+  if (model.length) s += ` -- model: ${model.join(', ')}`;
+  if (meta.mirror_updated_at) s += ` -- available to us ${formatCtDateTime(meta.mirror_updated_at)}`;
+  return s;
+}
+
+function renderFooter() {
+  if (!footerBase || !currentData) return;
+  document.getElementById('chartMeta').textContent = footerBase + vintageFooterTail(currentData);
+}
+
+function renderStaleBanner() {
+  const el = document.getElementById('staleBanner');
+  const v = currentData ? vintageInfo(currentData, Date.now()) : null;
+  if (v && v.stale) {
+    el.textContent = staleBannerText(v, currentData);
+    el.classList.add('show');
+  } else {
+    el.textContent = '';
+    el.classList.remove('show');
+  }
 }
 
 async function selectNode(nodeId) {
@@ -574,6 +662,17 @@ document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ?
 
 loadLastUpdated();
 setInterval(renderLastUpdated, 30000); // re-render "X min ago" without refetching
+
+// The forecast keeps getting older between data refreshes, so the banner and
+// footer follow the clock. If it crosses the stale line while the page is open,
+// redraw as well (the short tabs stop falling back to points in the past).
+setInterval(() => {
+  if (!currentData) return;
+  const v = vintageInfo(currentData, Date.now());
+  if (!!(v && v.stale) !== lastDrawnStale) { drawChart(); return; }
+  renderStaleBanner();
+  renderFooter();
+}, 30000);
 
 // Checks run_status.json every 2 minutes -- cheap single-key read, well
 // within KV's free read quota even polled this often. Only re-fetches and
