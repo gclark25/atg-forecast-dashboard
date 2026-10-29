@@ -7,18 +7,31 @@ main = "worker.js"
 # under load -- see /areas/askthegrid-forecast-eval notes). This runs on
 # Cloudflare's own scheduler instead of competing for GitHub's shared runner
 # queue. Same cadence as before, matching Metis 1's confirmed 15min issuance.
+#
+# ONE expression (so it adds no extra cron trigger to the account). The worker
+# picks the job by the minute that fired:
+#   :05 :20 :35 :50   nodal price pull (unchanged)
+#   :03 :06 :09 :33   one group of ERCOT's own reports each
+#   :38 :48 :58       check for a new Metis system forecast (a new one is
+#                     fetched in two batches, one per run)
 [triggers]
-crons = ["5,20,35,50 * * * *"]
+crons = ["3,5,6,9,20,33,35,38,48,50,58 * * * *"]
 
-# The /api/chat route (dashboard chat panel -> askthegrid's grid agent).
-# OFF for now: as of 2026-10-08 askthegrid's agent endpoint answers every
-# API-key call with 401 AUTH_REQUIRED (capability agent.ask), though the same
-# request works in their console while signed in. Waiting on their reply.
-# When access is sorted out, set this to "true" and run `npx wrangler deploy`.
-# The whole site sits behind the SITE_PASSWORD gate in worker.js, and every
-# message spends askthegrid usage (about $0.10 per turn as reported).
+# The /api/chat route (dashboard chat panel -> askthegrid's grid agent)
+# stays off until this is "true". Every message spends askthegrid usage and
+# the site has no login, so flip it only once something like Cloudflare
+# Access is in front of the site. Change it here and run `npx wrangler deploy`.
 [vars]
 CHAT_ENABLED = "false"
+
+# Metis zone-level series (23 extra reads per new forecast). "false" keeps just the
+# six system-level feeds, which is far fewer askthegrid calls. Change and redeploy.
+FUNDAMENTALS_ZONES = "true"
+
+# How many batches of 20 series the Metis job fetches per run. 1 keeps each run inside
+# the free plan's 10 ms CPU limit (a new forecast then completes in two runs). On a paid
+# plan, 2 fetches everything in one run.
+FUNDAMENTALS_BATCHES_PER_RUN = "1"
 
 [assets]
 directory = "dashboard"

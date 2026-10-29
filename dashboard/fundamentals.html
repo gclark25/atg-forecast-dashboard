@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATG Fundamentals: Metis vs ERCOT</title>
+<script src="theme.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1f2937; --text-secondary: #6b7280;
+    --border: #d1d5db; --accent: #1f3864; --accent-text: #ffffff;
+    --caveat-bg: #fde8e8; --caveat-border: #c00000; --caveat-text: #1f2937;
+    --warn-bg: #fff4e0; --warn-border: #b45309; --warn-text: #1f2937;
+    --ok: #0f6e56; --late: #b45309; --stale: #c00000;
+    --cell-empty: #eee; --day-line: #6b7280;
+    --bull: #b2182b; --bear: #2166ac;
+  }
+  html[data-theme="dark"] {
+    --bg: #0f1218; --card: #1a1f2b; --text: #e5e7eb; --text-secondary: #9ca3af;
+    --border: #374151; --accent: #5b7ec2; --accent-text: #0f1218;
+    --caveat-bg: #3a1f1f; --caveat-border: #e46a6a; --caveat-text: #f3d4d4;
+    --warn-bg: #3a2a12; --warn-border: #f0a04b; --warn-text: #f5e6cc;
+    --ok: #2dd4bf; --late: #f0a04b; --stale: #e46a6a;
+    --cell-empty: #2a2f3a; --day-line: #9ca3af;
+    --bull: #ef8a62; --bear: #67a9cf;
+  }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+  h1 { font-size: 20px; margin: 4px 0; }
+  h2 { font-size: 15px; margin: 0 0 4px; }
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; max-width: 920px; line-height: 1.5; }
+  a.nav { font-size: 13px; color: var(--accent); text-decoration: none; margin-right: 14px; }
+  .theme-toggle, .seg button {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; font-size: 13px;
+  }
+  .seg { display: inline-flex; gap: 0; }
+  .seg button { border-radius: 0; margin-left: -1px; padding: 5px 12px; font-size: 12px; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .last-updated { font-size: 12px; color: var(--text-secondary); margin-top: 6px; text-align: right; }
+  .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); margin-bottom: 16px; overflow-x: auto; }
+  .card .hint { font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; line-height: 1.5; }
+  .banner { padding: 10px 14px; border-radius: 6px; font-size: 13px; line-height: 1.5; margin-bottom: 14px; display: none; border-left: 4px solid var(--warn-border); background: var(--warn-bg); color: var(--warn-text); }
+  .banner.show { display: block; }
+  .banner.error { border-left-color: var(--caveat-border); background: var(--caveat-bg); color: var(--caveat-text); }
+  .controls { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; font-size: 12px; color: var(--text-secondary); }
+  .controls .grp { display: flex; align-items: center; gap: 6px; }
+
+  /* feed health */
+  .feeds { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+  .feed { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; border-left-width: 4px; }
+  .feed.fresh { border-left-color: var(--ok); } .feed.late { border-left-color: var(--late); } .feed.stale, .feed.missing { border-left-color: var(--stale); }
+  .feed .name { font-weight: 600; color: var(--text); }
+  .feed .age { color: var(--text-secondary); }
+  .feed .state { font-weight: 600; }
+  .feed.fresh .state { color: var(--ok); } .feed.late .state { color: var(--late); } .feed.stale .state, .feed.missing .state { color: var(--stale); }
+  details.more { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+  details.more summary { cursor: pointer; color: var(--accent); }
+  details.more ul { margin: 6px 0 0 18px; padding: 0; }
+
+  /* tables */
+  table.t { border-collapse: collapse; font-size: 13px; width: 100%; }
+  table.t th { text-align: left; font-size: 11px; color: var(--text-secondary); font-weight: 600; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  table.t td { padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  table.t td.num, table.t th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.t tr.group td { background: var(--bg); font-weight: 600; font-size: 12px; color: var(--text-secondary); }
+  table.t tr.key td { font-weight: 600; }
+  .sig { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .sig.bull { background: var(--bull); color: #fff; } .sig.bear { background: var(--bear); color: #fff; }
+  .sig.bull.weak { background: transparent; color: var(--bull); border: 1px solid var(--bull); } .sig.bear.weak { background: transparent; color: var(--bear); border: 1px solid var(--bear); }
+  .sig.flat { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+  .sig.none { color: var(--text-secondary); }
+  html[data-theme="dark"] .sig.bull, html[data-theme="dark"] .sig.bear { color: #0f1218; }
+  html[data-theme="dark"] .sig.bull.weak { color: var(--bull); }
+  html[data-theme="dark"] .sig.bear.weak { color: var(--bear); }
+  .peak { margin-top: 12px; font-size: 13px; line-height: 1.6; }
+
+  /* hourly strips */
+  table.strip { border-collapse: separate; border-spacing: 0; font-size: 11px; table-layout: fixed; }
+  table.strip td, table.strip th { padding: 0; }
+  table.strip th.lab { position: sticky; left: 0; background: var(--card); z-index: 2; text-align: left; font-weight: 600; font-size: 12px; padding: 0 10px 0 0; width: 190px; min-width: 190px; white-space: nowrap; }
+  table.strip th.hdr { font-weight: 500; color: var(--text-secondary); text-align: center; height: 18px; width: 36px; min-width: 36px; }
+  table.strip th.day { text-align: left; font-weight: 600; color: var(--text); border-bottom: 1px solid var(--border); padding: 3px 6px; white-space: nowrap; overflow: hidden; }
+  table.strip td.c { width: 36px; min-width: 36px; height: 26px; text-align: center; font-variant-numeric: tabular-nums; border-radius: 2px; }
+  table.strip .day-start { border-left: 2px solid var(--day-line); }
+  table.strip td.c.out { outline: 0; }
+  table.strip td.c.in { box-shadow: inset 0 0 0 1px rgba(0,0,0,0.35); }
+  table.strip td.c.dim { opacity: 0.38; }
+  .legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; }
+  .legend-bar { width: 160px; height: 10px; border-radius: 4px; background: linear-gradient(to right, #2166ac, #67a9cf, #d1e5f0, #f7f7f7, #fddbc7, #ef8a62, #b2182b); }
+  canvas { max-height: 380px; }
+  .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 22px; }
+  .checks > div { min-width: 0; overflow-x: auto; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); color: var(--text-secondary); }
+  .badge.good { color: var(--ok); border-color: var(--ok); } .badge.warn { color: var(--late); border-color: var(--late); } .badge.best { background: var(--ok); color: #fff; border-color: var(--ok); }
+  html[data-theme="dark"] .badge.best { color: #0f1218; }
+  .notes { font-size: 12px; color: var(--text-secondary); line-height: 1.6; max-width: 980px; }
+  .notes li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <a class="nav" href="fleet.html">&larr; Fleet overview</a><a class="nav" href="index.html">Node detail</a>
+    <h1>ATG Fundamentals: Metis vs ERCOT</h1>
+    <div class="subtitle">
+      Where Metis's system forecasts (load, wind, solar, outages, available capacity) differ from ERCOT's own forecasts, hour by hour.
+      <strong>Red</strong> means Metis sees a tighter grid than ERCOT (bullish), <strong>blue</strong> a looser one (bearish).
+      Every hour is in ERCOT Hour-Ending, Central Time.
+    </div>
+  </div>
+  <div>
+    <button class="theme-toggle" id="themeToggle">Dark mode</button>
+    <div class="last-updated" id="lastUpdated"></div>
+  </div>
+</div>
+
+<div class="banner error" id="errorBox"></div>
+<div class="banner" id="notice"></div>
+
+<div class="card">
+  <h2>Feed health</h2>
+  <p class="hint">A comparison is only as good as its inputs. Green is on schedule, amber is late, red is stale. "Typical gap" is measured from the postings this dashboard has seen, so it fills in over the first hours.</p>
+  <div class="feeds" id="feeds"></div>
+  <details class="more" id="feedMore"><summary>Details: posting history and how late each arrives</summary><div id="feedMoreBody"></div></details>
+</div>
+
+<div class="card">
+  <h2>Window summary</h2>
+  <div class="controls">
+    <div class="grp">Window <span class="seg" id="segWindow"></span></div>
+    <div class="grp">Wind basis <span class="seg" id="segWind"></span></div>
+    <div class="grp">Solar basis <span class="seg" id="segSolar"></span></div>
+    <div class="grp">Outages <span class="seg" id="segOutage"></span></div>
+    <div class="grp">Capacity <span class="seg" id="segAvail"></span></div>
+  </div>
+  <p class="hint">&Delta; = Metis median minus ERCOT's forecast. The signal compares that gap with Metis's own uncertainty (the p10 to p90 spread, as a standard deviation), averaged over the window: within 0.4 is in line, 0.4 to 1.0 leaning, over 1.0 strong. Tightness adds the net load and outage gaps. It leaves out available capacity and reserve margin, which already net those effects, so they are shown beside it as cross-checks instead of being added in.</p>
+  <div id="summary"></div>
+  <div class="peak" id="peak"></div>
+</div>
+
+<div class="card">
+  <h2>Hour by hour</h2>
+  <div class="legend"><span>Bearish</span><span class="legend-bar"></span><span>Bullish</span><span style="margin-left:12px">Numbers are &Delta; in GW (Metis minus ERCOT). Colour is the gap in Metis standard deviations, saturating at 2. The outlined hours are the selected window.</span></div>
+  <div id="strips"></div>
+</div>
+
+<div class="card">
+  <h2>Compare the curves</h2>
+  <div class="controls"><div class="grp">Series <span class="seg" id="segChart"></span></div></div>
+  <canvas id="detailChart"></canvas>
+  <div class="hint" id="chartNote" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+  <h2>By zone</h2>
+  <p class="hint">The same comparison for each region, averaged over the selected window. Zone series carry p10, p50 and p90 only.</p>
+  <div id="zones"></div>
+</div>
+
+<div class="card">
+  <h2>Self-checks</h2>
+  <p class="hint">The page tests its own assumptions with the data in front of it. MAD is the mean absolute difference between Metis's median and ERCOT's forecast over the hours both cover.</p>
+  <div class="checks" id="checks"></div>
+</div>
+
+<div class="card notes">
+  <h2>How to read this</h2>
+  <ul>
+    <li><strong>Timing.</strong> Metis timestamps its hours by their start, and ERCOT's hour-ending rows are converted to the same start, so a Metis 4:00 PM point is compared with ERCOT's HE17. The alignment check below confirms this from the data.</li>
+    <li><strong>Different vintages.</strong> The two sides are issued on different schedules (Metis hourly from :00, ERCOT's reports around :55, :00 and :30), so part of any gap is simply newer information on one side. The feed health card shows how old each side is.</li>
+    <li><strong>Percentiles.</strong> In the hour-by-hour tooltips, "sits at Metis p23" means ERCOT's number falls at the 23rd percentile of Metis's own forecast distribution for that hour. That is the strength of the signal for the system-level rows, which carry all 21 quantile levels.</li>
+    <li><strong>Not covered.</strong> Metis's net imports have no ERCOT forecast to compare with, so they appear only in the curve chart.</li>
+  </ul>
+</div>
+
+<script>
+// ===========================================================================
+// Pure logic: everything that turns the two stored states into numbers.
+// ===========================================================================
+// <fund-logic>
+const HOUR = 3600000;
+const LEVELS = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 99];
+const SIGMA_FROM_P10_P90 = 2.5631; // the p10 to p90 span of a normal distribution is 2.5631 standard deviations
+
+// ---- reading the stored columns ----
+function ercotMap(report) {
+  if (!report) return null;
+  if (!report._map) {
+    const m = new Map();
+    report.start.forEach((t, i) => m.set(t, i));
+    Object.defineProperty(report, '_map', { value: m, enumerable: false });
+  }
+  return report._map;
+}
+function ercotVal(report, key, t) {
+  const m = ercotMap(report);
+  if (!m || !report.cols || !report.cols[key]) return null;
+  const i = m.get(t);
+  if (i === undefined) return null;
+  const v = report.cols[key][i];
+  return v === null || v === undefined ? null : v;
+}
+// Of two reports that carry the same system-wide numbers, use the one posted more recently.
+function pickNewest(a, b) {
+  if (a && b) return Date.parse(b.posted_utc) > Date.parse(a.posted_utc) ? b : a;
+  return a || b || null;
+}
+function metisPoint(series, i) {
+  if (!series || !series.q || !series.q.p50) return null;
+  const p50 = series.q.p50[i], p10 = series.q.p10 ? series.q.p10[i] : null, p90 = series.q.p90 ? series.q.p90[i] : null;
+  if (p50 === null || p50 === undefined || p10 === null || p10 === undefined || p90 === null || p90 === undefined) return null;
+  const sigma = Math.max((p90 - p10) / SIGMA_FROM_P10_P90, 0.003 * Math.abs(p50), 1);
+  return { i, t: series.start[i], p10, p50, p90, sigma, q: series.q };
+}
+// Where ERCOT's number falls inside Metis's own distribution (0 to 100), from the 21 levels. Null when the series has fewer.
+function pctInLevels(q, i, x) {
+  const vals = [];
+  for (const L of LEVELS) {
+    const arr = q['p' + String(L).padStart(2, '0')];
+    if (!arr || arr[i] === null || arr[i] === undefined) return null;
+    vals.push(arr[i]);
+  }
+  const last = vals.length - 1;
+  if (x < vals[0]) return 0;
+  if (x > vals[last]) return 100;
+  for (let j = 0; j < last; j++) {
+    if (x >= vals[j] && x <= vals[j + 1]) {
+      const span = vals[j + 1] - vals[j];
+      return span <= 0 ? LEVELS[j] : LEVELS[j] + ((x - vals[j]) / span) * (LEVELS[j + 1] - LEVELS[j]);
+    }
+  }
+  return null;
+}
+// sign: +1 when a Metis number ABOVE ERCOT's is bullish (load, outages, net load), -1 when it is bearish (wind, solar, capacity).
+function pairAt(mp, e, sign) {
+  if (!mp || e === null || e === undefined) return null;
+  const delta = mp.p50 - e;
+  return { t: mp.t, metis: mp.p50, p10: mp.p10, p90: mp.p90, ercot: e, delta, sigma: mp.sigma, z: (sign * delta) / mp.sigma, pct: pctInLevels(mp.q, mp.i, e), sign };
+}
+
+// ---- the hourly drivers, on Metis's own 47-hour grid ----
+function outageValue(rep, suffix, withIrr, t) {
+  const r = ercotVal(rep, 'resource_' + suffix, t);
+  if (r === null) return null;
+  if (!withIrr) return r;
+  const irr = ercotVal(rep, 'irr_' + suffix, t);
+  return irr === null ? null : r + irr;
+}
+function availValue(rep, def, t) {
+  const g = ercotVal(rep, 'avail_cap_gen', t);
+  if (g === null) return null;
+  if (def !== 'gen_load') return g;
+  const l = ercotVal(rep, 'cap_load_res', t);
+  return l === null ? null : g + l;
+}
+function buildDrivers(ercot, metis, opts) {
+  const S = (k) => (metis.series && metis.series[k]) || null;
+  const Lser = S('load:system');
+  if (!Lser) return null;
+  const grid = Lser.start;
+  const R = ercot.reports || {};
+  const windRep = pickNewest(R.wind_system, R.wind), solarRep = pickNewest(R.solar_system, R.solar);
+  const out = { load: [], wind: [], solar: [], net: [], outage: [], tight: [], avail: [], rm: [] };
+  for (let i = 0; i < grid.length; i++) {
+    const t = grid[i];
+    const mL = metisPoint(Lser, i), mW = metisPoint(S('wind:system'), i), mS = metisPoint(S('solar:system'), i);
+    const mO = metisPoint(S('outage:system'), i), mA = metisPoint(S('avail_cap:system'), i);
+    const load = pairAt(mL, ercotVal(R.load, 'system', t), +1);
+    const wind = pairAt(mW, ercotVal(windRep, 'system_' + opts.windBasis, t), -1);
+    const solar = pairAt(mS, ercotVal(solarRep, 'system_' + opts.solarBasis, t), -1);
+    const outage = pairAt(mO, outageValue(R.outage, 'system', opts.outageDef === 'resource_irr', t), +1);
+    const avail = pairAt(mA, availValue(R.adequacy, opts.availDef, t), -1);
+    let net = null, tight = null, rm = null;
+    if (load && wind && solar) {
+      const delta = load.delta - wind.delta - solar.delta;
+      const sigma = Math.sqrt(load.sigma ** 2 + wind.sigma ** 2 + solar.sigma ** 2);
+      net = { t, metis: load.metis - wind.metis - solar.metis, ercot: load.ercot - wind.ercot - solar.ercot, delta, sigma, z: delta / sigma, pct: null, sign: +1 };
+    }
+    if (net && outage) {
+      const delta = net.delta + outage.delta;
+      const sigma = Math.sqrt(net.sigma ** 2 + outage.sigma ** 2);
+      tight = { t, metis: null, ercot: null, delta, sigma, z: delta / sigma, pct: null, sign: +1 };
+    }
+    const eRm = ercotVal(R.adequacy, 'avail_cap_res', t);
+    if (mA && mL && eRm !== null) {
+      const metisRm = mA.p50 - mL.p50;
+      const delta = metisRm - eRm;
+      const sigma = Math.sqrt(mA.sigma ** 2 + mL.sigma ** 2);
+      rm = { t, metis: metisRm, ercot: eRm, delta, sigma, z: -delta / sigma, pct: null, sign: -1 };
+    }
+    out.load.push(load); out.wind.push(wind); out.solar.push(solar); out.net.push(net);
+    out.outage.push(outage); out.tight.push(tight); out.avail.push(avail); out.rm.push(rm);
+  }
+  return { grid, drivers: out, windRep, solarRep };
+}
+
+// ---- windows and signals ----
+function windowIndices(grid, nowMs, hours) {
+  const idx = [];
+  for (let i = 0; i < grid.length && idx.length < hours; i++) if (grid[i] + HOUR > nowMs) idx.push(i); // hours not yet over
+  return idx;
+}
+function windowStats(arr, idx) {
+  let n = 0, sd = 0, sz = 0, nm = 0, sm = 0, se = 0;
+  for (const i of idx) {
+    const p = arr[i];
+    if (!p) continue;
+    n++; sd += p.delta; sz += p.z;
+    if (p.metis !== null && p.metis !== undefined) { nm++; sm += p.metis; se += p.ercot; }
+  }
+  if (!n) return null;
+  return { n, hours: idx.length, delta: sd / n, z: sz / n, metis: nm ? sm / nm : null, ercot: nm ? se / nm : null };
+}
+function classify(z) {
+  if (z === null || z === undefined || !Number.isFinite(z)) return { label: 'no data', side: 'none', weak: false };
+  const a = Math.abs(z);
+  if (a < 0.4) return { label: 'In line', side: 'flat', weak: false };
+  const side = z > 0 ? 'bull' : 'bear';
+  if (a >= 1.0) return { label: side === 'bull' ? 'Strongly bullish' : 'Strongly bearish', side, weak: false };
+  return { label: side === 'bull' ? 'Leaning bullish' : 'Leaning bearish', side, weak: true };
+}
+function peakHour(tightArr, idx) {
+  let best = null;
+  for (const i of idx) { const p = tightArr[i]; if (p && (best === null || p.delta > tightArr[best].delta)) best = i; }
+  return best;
+}
+
+// ---- self-checks ----
+function alignmentCheck(series, report, key) {
+  const shifts = {};
+  for (const k of [-1, 0, 1]) {
+    let n = 0, s = 0;
+    for (let i = 0; i < series.start.length; i++) {
+      const m = series.q.p50[i], e = ercotVal(report, key, series.start[i] + k * HOUR);
+      if (m === null || m === undefined || e === null) continue;
+      n++; s += Math.abs(m - e);
+    }
+    shifts[k] = { n, mad: n ? s / n : null };
+  }
+  if ([-1, 0, 1].some((k) => shifts[k].mad === null) || shifts[0].n < 6) return { shifts, verdict: 'insufficient', best: null };
+  const mads = [-1, 0, 1].map((k) => shifts[k].mad), lo = Math.min(...mads), hi = Math.max(...mads);
+  if (hi - lo <= 0.02 * Math.max(hi, 1)) return { shifts, verdict: 'weak', best: 0 }; // shifting changes nothing, so the check cannot tell
+  const best = [-1, 0, 1].reduce((a, b) => (shifts[a].mad <= shifts[b].mad ? a : b));
+  // Decisive means the winner is at least 15% closer than the runner-up. Anything less is noise: two forecasts
+  // that genuinely disagree about wind, say, can make a wrong shift look slightly better by chance.
+  const verdict = best === 0
+    ? (shifts[0].mad < 0.85 * Math.min(shifts[-1].mad, shifts[1].mad) ? 'aligned' : 'weak')
+    : (shifts[best].mad < 0.85 * shifts[0].mad ? 'shifted' : 'weak');
+  return { shifts, verdict, best };
+}
+function definitionFit(series, candidates) {
+  const rows = candidates.map((c) => {
+    let n = 0, sa = 0, sb = 0;
+    for (let i = 0; i < series.start.length; i++) {
+      const m = series.q.p50[i], e = c.get(series.start[i]);
+      if (m === null || m === undefined || e === null || e === undefined) continue;
+      n++; sa += Math.abs(m - e); sb += m - e;
+    }
+    return { label: c.label, key: c.key, n, mad: n ? sa / n : null, bias: n ? sb / n : null };
+  });
+  const ok = rows.filter((r) => r.mad !== null);
+  if (!ok.length) return { rows, best: null, decisive: false };
+  const sorted = ok.slice().sort((a, b) => a.mad - b.mad);
+  return { rows, best: sorted[0].key, decisive: sorted.length < 2 || sorted[0].mad < 0.7 * sorted[1].mad };
+}
+
+// ---- feed health ----
+function median(a) {
+  if (!a.length) return null;
+  const s = a.slice().sort((x, y) => x - y), m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+function typicalGapMinutes(history, field) {
+  if (!history || history.length < 3) return null;
+  const ts = history.map((h) => Date.parse(h[field])).filter(Number.isFinite).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < ts.length; i++) gaps.push((ts[i] - ts[i - 1]) / 60000);
+  const m = median(gaps);
+  return m === null ? null : Math.round(m);
+}
+function feedState(ageMin, gapMin) {
+  if (ageMin === null || ageMin === undefined || !Number.isFinite(ageMin)) return 'missing';
+  const g = gapMin || 60;
+  if (ageMin <= 1.5 * g + 30) return 'fresh';
+  if (ageMin <= 3 * g) return 'late';
+  return 'stale';
+}
+// </fund-logic>
+
+// ===========================================================================
+// Page
+// ===========================================================================
+const ERCOT_NAMES = {
+  load: 'ERCOT load forecast', wind: 'ERCOT wind, by region', wind_system: 'ERCOT wind, system',
+  solar: 'ERCOT solar, by region', solar_system: 'ERCOT solar, system', outage: 'ERCOT resource outages', adequacy: 'ERCOT adequacy (capacity)',
+};
+const ui = { windowHours: 36, windBasis: 'stwpf', solarBasis: 'stppf', outageDef: 'resource', availDef: 'gen', chart: 'load' };
+let ercot = null, metis = null, model = null, chart = null;
+
+const CT_DATE = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' });
+const CT_TIME = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true });
+const CT_DAY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', weekday: 'short', month: 'short', day: 'numeric' });
+const CT_HOUR = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: '2-digit', hourCycle: 'h23' });
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ctDateKey = (ms) => { const p = Object.fromEntries(CT_DATE.formatToParts(new Date(ms)).map((x) => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; };
+const ctHE = (ms) => parseInt(CT_HOUR.format(new Date(ms)), 10) + 1;  // interval START hour + 1 = ERCOT hour ending
+const fmtTime = (ms) => `${CT_TIME.format(new Date(ms))} CT`;
+const fmtDayTime = (ms) => `${CT_DAY.format(new Date(ms))}, ${fmtTime(ms)}`;
+const fmtInt = (v) => (v === null || v === undefined || !Number.isFinite(v) ? '-' : Math.round(v).toLocaleString('en-US'));
+const fmtSigned = (v) => (v === null || v === undefined || !Number.isFinite(v) ? '-' : (v >= 0 ? '+' : '\u2212') + Math.abs(Math.round(v)).toLocaleString('en-US'));
+const fmtGw = (v) => { const g = v / 1000; return Math.abs(g) < 0.05 ? '0.0' : (g > 0 ? '+' : '\u2212') + Math.abs(g).toFixed(1); };
+function fmtAge(min) {
+  if (min === null || !Number.isFinite(min)) return 'unknown';
+  const m = Math.max(0, Math.round(min)), h = Math.floor(m / 60);
+  return h === 0 ? `${m}m` : `${h}h ${String(m % 60).padStart(2, '0')}m`;
+}
+function pctText(p) { return p === null || p === undefined ? '' : p <= 0 ? 'below p01' : p >= 100 ? 'above p99' : `p${Math.round(p)}`; }
+
+// blue (bearish) -> white -> red (bullish), the same RdBu stops as the fleet heat map
+const STOPS = [[33, 102, 172], [103, 169, 207], [209, 229, 240], [247, 247, 247], [253, 219, 199], [239, 138, 98], [178, 24, 43]];
+function zColor(z) {
+  const t = (Math.max(-2, Math.min(2, z)) + 2) / 4;
+  const x = t * (STOPS.length - 1), i = Math.min(STOPS.length - 2, Math.floor(x)), f = x - i;
+  return STOPS[i].map((v, k) => Math.round(v + (STOPS[i + 1][k] - v) * f));
+}
+function textFor(rgb) {
+  const lum = (c) => { const x = c / 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+  const L = 0.2126 * lum(rgb[0]) + 0.7152 * lum(rgb[1]) + 0.0722 * lum(rgb[2]);
+  return 1.05 / (L + 0.05) > (L + 0.05) / 0.05 ? '#fff' : '#000';
+}
+
+async function fetchJson(path) {
+  const res = await fetch(path + '?_=' + Date.now());
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`${path} returned HTTP ${res.status}`);
+  return JSON.parse(await res.text());
+}
+
+function showError(msg) { const b = document.getElementById('errorBox'); b.textContent = msg; b.classList.toggle('show', !!msg); }
+function showNotice(lines) { const b = document.getElementById('notice'); b.innerHTML = lines.map(esc).join('<br>'); b.classList.toggle('show', lines.length > 0); }
+
+function seg(id, options, current, onPick) {
+  const el = document.getElementById(id);
+  el.innerHTML = '';
+  for (const [value, label] of options) {
+    const b = document.createElement('button');
+    b.textContent = label; b.type = 'button';
+    if (String(value) === String(current)) b.classList.add('active');
+    b.onclick = () => onPick(value);
+    el.appendChild(b);
+  }
+}
+
+// ---------------------------------------------------------------------------
+function renderFeeds(now) {
+  const cards = [];
+  const mv = metis && metis.issued_at ? Date.parse(metis.issued_at) : null;
+  const metisGap = typicalGapMinutes(metis && metis.vintage_log, 'issued_at');
+  const mAge = mv === null ? null : (now - mv) / 60000;
+  cards.push({
+    name: 'Metis system forecast', ts: mv, age: mAge, gap: metisGap, state: feedState(mAge, metisGap),
+    extra: metis && metis.mirror_updated_at ? `reached us ${fmtTime(Date.parse(metis.mirror_updated_at))}` : '',
+    tag: metis && metis.model ? metis.model.short_name : '',
+  });
+  for (const id of Object.keys(ERCOT_NAMES)) {
+    const r = ercot && ercot.reports && ercot.reports[id];
+    const posted = r ? Date.parse(r.posted_utc) : null;
+    const age = posted === null ? null : (now - posted) / 60000;
+    const gap = typicalGapMinutes(ercot && ercot.history && ercot.history[id], 'posted_utc');
+    const err = ercot && ercot.errors && ercot.errors[id];
+    cards.push({ name: ERCOT_NAMES[id], ts: posted, age, gap, state: r ? feedState(age, gap) : 'missing', extra: err ? `last error: ${err.kind}` : (r && r.gaps && r.gaps.length ? `${r.gaps.length} gap in the hours` : ''), tag: r ? r.source : '' });
+  }
+  document.getElementById('feeds').innerHTML = cards.map((c) => `
+    <div class="feed ${c.state}">
+      <div class="name">${esc(c.name)} <span class="age">${esc(c.tag)}</span></div>
+      <div>${c.ts === null ? 'no data yet' : `${c.name.startsWith('Metis') ? 'issued' : 'posted'} ${esc(fmtTime(c.ts))}`}${c.extra ? ` &middot; ${esc(c.extra)}` : ''}</div>
+      <div><span class="state">${c.state === 'fresh' ? 'On schedule' : c.state === 'late' ? 'Late' : c.state === 'stale' ? 'Stale' : 'Missing'}</span> <span class="age">&middot; ${c.age === null ? '' : esc(fmtAge(c.age)) + ' old'}${c.gap ? ` &middot; typical gap ${c.gap}m` : ' &middot; typical gap: building history'}</span></div>
+    </div>`).join('');
+
+  const items = [];
+  const lag = (h) => (h.lag_min === undefined ? '' : ` (seen ${fmtAge(h.lag_min)} after it ${'issued_at' in h ? 'was issued' : 'posted'})`);
+  if (metis && metis.vintage_log && metis.vintage_log.length) {
+    items.push(`<li><strong>Metis forecasts seen:</strong> ${metis.vintage_log.slice(0, 8).map((h) => esc(fmtTime(Date.parse(h.issued_at))) + esc(lag(h))).join('; ')}</li>`);
+  }
+  for (const id of Object.keys(ERCOT_NAMES)) {
+    const h = ercot && ercot.history && ercot.history[id];
+    if (h && h.length) items.push(`<li><strong>${esc(ERCOT_NAMES[id])}:</strong> ${h.slice(0, 6).map((x) => esc(fmtTime(Date.parse(x.posted_utc))) + esc(lag(x))).join('; ')}</li>`);
+  }
+  if (ercot && ercot.egress) items.push(`<li><strong>This dashboard reaches ERCOT from:</strong> ${esc(ercot.egress.colo || '?')}, ${esc(ercot.egress.loc || '?')} (checked ${esc(fmtTime(Date.parse(ercot.egress.at)))})</li>`);
+  document.getElementById('feedMoreBody').innerHTML = `<ul>${items.join('') || '<li>No history yet.</li>'}</ul>`;
+}
+
+function signalHtml(z) {
+  const c = classify(z);
+  return `<span class="sig ${c.side}${c.weak ? ' weak' : ''}" title="average gap of ${Number.isFinite(z) ? (z >= 0 ? '+' : '\u2212') + Math.abs(z).toFixed(2) : 'n/a'} Metis standard deviations">${esc(c.label)}</span>`;
+}
+
+const DRIVER_ROWS = [
+  ['load', 'Load', 'MW'], ['wind', 'Wind', 'MW'], ['solar', 'Solar', 'MW'], ['net', 'Net load (load \u2212 wind \u2212 solar)', 'MW'],
+  ['outage', 'Outages', 'MW'], ['tight', 'Tightness (net load + outages)', 'MW'],
+  ['rm', 'Reserve margin (cross-check)', 'MW'], ['avail', 'Available capacity (cross-check)', 'MW'],
+];
+
+function renderSummary(now) {
+  const idx = windowIndices(model.grid, now, ui.windowHours);
+  const rows = DRIVER_ROWS.map(([key, label]) => {
+    const st = windowStats(model.drivers[key], idx);
+    const key2 = key === 'tight' ? ' class="key"' : '';
+    if (!st) return `<tr${key2}><td>${esc(label)}</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td><span class="sig none">no overlapping hours</span></td><td class="num">0</td></tr>`;
+    return `<tr${key2}><td>${esc(label)}</td><td class="num">${fmtInt(st.metis)}</td><td class="num">${fmtInt(st.ercot)}</td><td class="num">${fmtSigned(st.delta)}</td><td>${signalHtml(st.z)}</td><td class="num">${st.n}/${st.hours}</td></tr>`;
+  });
+  document.getElementById('summary').innerHTML = `<table class="t"><thead><tr><th>Driver</th><th class="num">Metis avg (MW)</th><th class="num">ERCOT avg (MW)</th><th class="num">&Delta; (MW)</th><th>Signal</th><th class="num">Hours</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+
+  const pk = peakHour(model.drivers.tight, idx);
+  const el = document.getElementById('peak');
+  if (pk === null) { el.textContent = ''; return; }
+  const p = model.drivers.tight[pk], t = model.grid[pk];
+  const comp = (k) => { const q = model.drivers[k][pk]; return q ? fmtSigned(q.delta) : '-'; };
+  el.innerHTML = `<strong>Peak tightness hour in this window:</strong> ${esc(fmtDayTime(t))} (HE${ctHE(t)}), where Metis is ${fmtSigned(p.delta)} MW tighter than ERCOT overall `
+    + `(load ${comp('load')}, wind ${comp('wind')}, solar ${comp('solar')}, outages ${comp('outage')} MW). ${signalHtml(p.z)}`;
+}
+
+function tipFor(label, p, t) {
+  if (!p) return `${fmtDayTime(t)} HE${ctHE(t)}\n${label}: no overlapping ERCOT value`;
+  const parts = [`${fmtDayTime(t)} (HE${ctHE(t)})`, label];
+  if (p.metis !== null) parts.push(`Metis ${fmtInt(p.metis)} MW` + (p.p10 !== undefined ? ` (p10 to p90 ${fmtInt(p.p10)} to ${fmtInt(p.p90)})` : ''));
+  if (p.ercot !== null) parts.push(`ERCOT ${fmtInt(p.ercot)} MW` + (p.pct !== null && p.pct !== undefined ? `, which sits at Metis ${pctText(p.pct)}` : ''));
+  parts.push(`Gap ${fmtSigned(p.delta)} MW = ${(p.z >= 0 ? '+' : '\u2212') + Math.abs(p.z).toFixed(2)} Metis standard deviations (${classify(p.z).label.toLowerCase()})`);
+  return parts.join('\n');
+}
+
+function renderStrips(now) {
+  const grid = model.grid, inWin = new Set(windowIndices(grid, now, ui.windowHours));
+  const days = [];
+  grid.forEach((t, i) => {
+    const key = ctDateKey(t);
+    const last = days[days.length - 1];
+    if (last && last.key === key) last.count++; else days.push({ key, count: 1, t, start: i });
+  });
+  const dayStart = new Set(days.slice(1).map((d) => d.start));
+  let html = `<table class="strip"><thead><tr><th class="lab"></th>`;
+  for (const d of days) html += `<th class="day${dayStart.has(d.start) ? ' day-start' : ''}" colspan="${d.count}">${esc(d.count >= 4 ? CT_DAY.format(new Date(d.t)) : d.count >= 2 ? CT_DAY.format(new Date(d.t)).slice(5) : '')}</th>`;
+  html += `</tr><tr><th class="lab" style="font-weight:500;color:var(--text-secondary)">Hour ending (CT)</th>`;
+  grid.forEach((t, i) => { html += `<th class="hdr${dayStart.has(i) ? ' day-start' : ''}">${ctHE(t)}</th>`; });
+  html += `</tr></thead><tbody>`;
+  for (const [key, label] of DRIVER_ROWS) {
+    html += `<tr><th class="lab">${esc(label.replace(/ \(.*\)$/, ''))}</th>`;
+    grid.forEach((t, i) => {
+      const p = model.drivers[key][i];
+      const cls = `c${dayStart.has(i) ? ' day-start' : ''}${inWin.has(i) ? ' in' : ' dim'}`;
+      if (!p) { html += `<td class="${cls}" style="background:var(--cell-empty)" title="${esc(tipFor(label, null, t))}"></td>`; return; }
+      const rgb = zColor(p.z);
+      html += `<td class="${cls}" style="background:rgb(${rgb});color:${textFor(rgb)}" title="${esc(tipFor(label, p, t))}">${fmtGw(p.delta)}</td>`;
+    });
+    html += `</tr>`;
+  }
+  document.getElementById('strips').innerHTML = html + `</tbody></table>`;
+}
+
+// ---- the curve chart ----
+function chartSpec(which) {
+  const R = ercot.reports, S = metis.series;
+  const get = (rep, key) => (t) => ercotVal(rep, key, t);
+  switch (which) {
+    case 'load': return { title: 'Load', metis: S['load:system'], lines: [{ label: 'ERCOT load forecast', fn: get(R.load, 'system') }] };
+    case 'wind': return { title: 'Wind generation', metis: S['wind:system'], lines: [{ label: 'ERCOT STWPF', fn: get(model.windRep, 'system_stwpf') }, { label: 'ERCOT WGRPP', fn: get(model.windRep, 'system_wgrpp'), dash: true }] };
+    case 'solar': return { title: 'Solar generation', metis: S['solar:system'], lines: [{ label: 'ERCOT STPPF', fn: get(model.solarRep, 'system_stppf') }, { label: 'ERCOT PVGRPP', fn: get(model.solarRep, 'system_pvgrpp'), dash: true }] };
+    case 'outage': return { title: 'Outage capacity', metis: S['outage:system'], lines: [{ label: 'ERCOT resource outages', fn: (t) => outageValue(R.outage, 'system', false, t) }, { label: 'ERCOT resource + IRR', fn: (t) => outageValue(R.outage, 'system', true, t), dash: true }] };
+    case 'avail': return { title: 'Available capacity', metis: S['avail_cap:system'], lines: [{ label: 'ERCOT available capacity (gen)', fn: (t) => availValue(R.adequacy, 'gen', t) }, { label: 'ERCOT gen + load resources', fn: (t) => availValue(R.adequacy, 'gen_load', t), dash: true }] };
+    case 'imports': return { title: 'Net imports (Metis only: ERCOT publishes no forecast)', metis: S['net_imports:system'], lines: [] };
+    default: return null;
+  }
+}
+function renderChart() {
+  const spec = chartSpec(ui.chart);
+  const note = document.getElementById('chartNote');
+  if (typeof Chart === 'undefined') { note.textContent = 'The chart library did not load; the tables above still work.'; return; }
+  if (chart) { chart.destroy(); chart = null; }
+  if (!spec || !spec.metis) { note.textContent = 'No data for this series yet.'; return; }
+  const s = spec.metis, dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const tick = dark ? '#9ca3af' : '#6b7280', grid = dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+  const metisCol = dark ? '#8fb3ff' : '#1f3864', ercotCols = dark ? ['#f0a04b', '#e46a6a'] : ['#b45309', '#c00000'];
+  // every second hour is labelled, plus the first hour of each day with its date, so a new day is never skipped
+  const labels = s.start.map((t, i) => { const he = ctHE(t); const first = i === 0 || ctDateKey(s.start[i - 1]) !== ctDateKey(t); const text = first || he % 2 === 0 ? String(he) : ''; return first ? [text, CT_DAY.format(new Date(t)).slice(5)] : text; });
+  const datasets = [
+    { label: 'Metis p10 to p90', data: s.q.p90, borderColor: 'rgba(120,150,230,0.0)', backgroundColor: dark ? 'rgba(120,150,230,0.18)' : 'rgba(31,56,100,0.12)', fill: '+1', pointRadius: 0 },
+    { label: 'Metis p10', data: s.q.p10, borderColor: 'rgba(120,150,230,0.0)', fill: false, pointRadius: 0 },
+    { label: 'Metis median', data: s.q.p50, borderColor: metisCol, backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0 },
+    ...spec.lines.map((l, k) => ({ label: l.label, data: s.start.map((t) => l.fn(t)), borderColor: ercotCols[k], backgroundColor: 'transparent', borderWidth: 2, borderDash: l.dash ? [6, 4] : [], pointRadius: 0, spanGaps: false })),
+  ];
+  chart = new Chart(document.getElementById('detailChart'), {
+    type: 'line', data: { labels, datasets },
+    options: {
+      responsive: true, interaction: { mode: 'index', intersect: false },
+      scales: { x: { ticks: { autoSkip: false, maxRotation: 0, color: tick }, grid: { color: grid } }, y: { title: { display: true, text: 'MW', color: tick }, ticks: { color: tick }, grid: { color: grid } } },
+      plugins: { legend: { position: 'bottom', labels: { color: tick, filter: (it) => it.text !== 'Metis p10' } }, tooltip: { callbacks: { title: (items) => fmtDayTime(s.start[items[0].dataIndex]) + ` (HE${ctHE(s.start[items[0].dataIndex])})`, label: (c) => (c.parsed.y === null ? `${c.dataset.label}: n/a` : `${c.dataset.label}: ${fmtInt(c.parsed.y)} MW`) } } },
+    },
+  });
+  note.textContent = spec.title + '. The shaded band is Metis p10 to p90.';
+}
+
+// ---- zones ----
+function renderZones(now) {
+  const idx = windowIndices(model.grid, now, ui.windowHours);
+  const R = ercot.reports, S = metis.series;
+  const groups = [
+    { title: 'Load by weather zone', key: 'load', sign: +1, zones: ['coast', 'east', 'far_west', 'north', 'north_central', 'south_central', 'southern', 'west'], get: (z) => (t) => ercotVal(R.load, z, t) },
+    { title: 'Wind by region', key: 'wind', sign: -1, zones: ['coastal', 'north', 'panhandle', 'south', 'west'], get: (z) => (t) => ercotVal(R.wind, `${z}_${ui.windBasis}`, t) },
+    { title: 'Solar by region', key: 'solar', sign: -1, zones: ['center_east', 'center_west', 'far_east', 'far_west', 'north_west', 'south_east'], get: (z) => (t) => ercotVal(R.solar, `${z}_${ui.solarBasis}`, t) },
+    { title: 'Outages by load zone', key: 'outage', sign: +1, zones: ['houston', 'north', 'south', 'west'], get: (z) => (t) => outageValue(R.outage, z, ui.outageDef === 'resource_irr', t) },
+  ];
+  let html = `<table class="t"><thead><tr><th>Region</th><th class="num">Metis avg (MW)</th><th class="num">ERCOT avg (MW)</th><th class="num">&Delta; (MW)</th><th>Signal</th><th class="num">Hours</th></tr></thead><tbody>`;
+  for (const g of groups) {
+    html += `<tr class="group"><td colspan="6">${esc(g.title)}</td></tr>`;
+    for (const z of g.zones) {
+      const ser = S[`${g.key}:${z}`];
+      const arr = ser ? ser.start.map((t, i) => pairAt(metisPoint(ser, i), g.get(z)(t), g.sign)) : [];
+      const lookup = ser ? new Map(ser.start.map((t, i) => [t, i])) : new Map();
+      // The zone series use the same hours as the system series; map the window by start time.
+      const idxZ = idx.map((i) => lookup.get(model.grid[i])).filter((v) => v !== undefined);
+      const st = ser ? windowStats(arr, idxZ) : null;
+      const name = z.replace(/_/g, ' ');
+      html += st ? `<tr><td>${esc(name)}</td><td class="num">${fmtInt(st.metis)}</td><td class="num">${fmtInt(st.ercot)}</td><td class="num">${fmtSigned(st.delta)}</td><td>${signalHtml(st.z)}</td><td class="num">${st.n}/${idx.length}</td></tr>`
+        : `<tr><td>${esc(name)}</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td><span class="sig none">${ser ? 'no overlapping hours' : 'no Metis series'}</span></td><td class="num">0</td></tr>`;
+    }
+  }
+  document.getElementById('zones').innerHTML = html + `</tbody></table>`;
+}
+
+// ---- self-checks ----
+function renderChecks() {
+  const R = ercot.reports, S = metis.series;
+  const html = [];
+  const verdictBadge = (v) => ({ aligned: '<span class="badge good">aligned</span>', weak: '<span class="badge warn">inconclusive</span>', shifted: '<span class="badge warn">looks shifted</span>', insufficient: '<span class="badge">not enough overlap</span>' }[v]);
+  const rowsA = [
+    ['Load', S['load:system'], R.load, 'system'],
+    ['Wind', S['wind:system'], model.windRep, `system_${ui.windBasis}`],
+    ['Solar', S['solar:system'], model.solarRep, `system_${ui.solarBasis}`],
+  ].map(([name, ser, rep, key]) => {
+    if (!ser || !rep) return `<tr><td>${name}</td><td colspan="4"><span class="badge">no data</span></td></tr>`;
+    const a = alignmentCheck(ser, rep, key);
+    const cell = (k) => `<td class="num${a.best === k ? '" style="font-weight:700' : ''}">${a.shifts[k].mad === null ? '-' : fmtInt(a.shifts[k].mad)}</td>`;
+    return `<tr><td>${name}</td>${cell(-1)}${cell(0)}${cell(1)}<td>${verdictBadge(a.verdict)}</td></tr>`;
+  }).join('');
+  html.push(`<div><h2>Hour alignment</h2><p class="hint">Shifts ERCOT by one hour either way and measures the gap to Metis. If the timestamps are matched correctly, no shift (0) should be clearly the closest.</p>
+    <table class="t"><thead><tr><th>Series</th><th class="num">ERCOT &minus;1h</th><th class="num">0</th><th class="num">+1h</th><th>Verdict</th></tr></thead><tbody>${rowsA}</tbody></table></div>`);
+
+  const fitTable = (title, ser, cands, hint) => {
+    if (!ser) return `<div><h2>${esc(title)}</h2><span class="badge">no Metis series</span></div>`;
+    const f = definitionFit(ser, cands);
+    const rows = f.rows.map((r) => `<tr><td>${esc(r.label)}</td><td class="num">${r.mad === null ? '-' : fmtInt(r.mad)}</td><td class="num">${r.bias === null ? '-' : fmtSigned(r.bias)}</td><td>${f.best === r.key ? `<span class="badge best">closest${f.decisive ? '' : ' (narrowly)'}</span>` : ''}</td></tr>`).join('');
+    return `<div><h2>${esc(title)}</h2><p class="hint">${hint}</p><table class="t"><thead><tr><th>ERCOT series</th><th class="num">MAD (MW)</th><th class="num">Bias (MW)</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  };
+  html.push(fitTable('Which wind forecast does Metis track?', S['wind:system'], [
+    { key: 'stwpf', label: 'STWPF', get: (t) => ercotVal(model.windRep, 'system_stwpf', t) }, { key: 'wgrpp', label: 'WGRPP', get: (t) => ercotVal(model.windRep, 'system_wgrpp', t) }], 'Bias is Metis minus ERCOT.'));
+  html.push(fitTable('Which solar forecast does Metis track?', S['solar:system'], [
+    { key: 'stppf', label: 'STPPF', get: (t) => ercotVal(model.solarRep, 'system_stppf', t) }, { key: 'pvgrpp', label: 'PVGRPP', get: (t) => ercotVal(model.solarRep, 'system_pvgrpp', t) }], 'Bias is Metis minus ERCOT.'));
+  html.push(fitTable('What does Metis mean by outage capacity?', S['outage:system'], [
+    { key: 'resource', label: 'Resource outages', get: (t) => outageValue(R.outage, 'system', false, t) }, { key: 'resource_irr', label: 'Resource + IRR (renewables)', get: (t) => outageValue(R.outage, 'system', true, t) }], 'The vendor does not define the series; this shows which ERCOT figure it matches. Use the closest as the default above.'));
+  html.push(fitTable('What does Metis mean by available capacity?', S['avail_cap:system'], [
+    { key: 'gen', label: 'Generation resources (availCapGen)', get: (t) => availValue(R.adequacy, 'gen', t) }, { key: 'gen_load', label: 'Generation + load resources', get: (t) => availValue(R.adequacy, 'gen_load', t) }], 'ERCOT\'s adequacy report is the only published capacity outlook. If neither matches closely, the vendor\'s definition differs from ERCOT\'s.'));
+  document.getElementById('checks').innerHTML = html.join('');
+}
+
+// ---------------------------------------------------------------------------
+function renderAll() {
+  const now = Date.now();
+  renderFeeds(now);
+  const lu = document.getElementById('lastUpdated');
+  const latest = Math.max(ercot && ercot.updated_at ? Date.parse(ercot.updated_at) : 0, metis && metis.updated_at ? Date.parse(metis.updated_at) : 0);
+  lu.textContent = latest ? `Data stored ${fmtTime(latest)} (${fmtAge((now - latest) / 60000)} ago)` : 'Waiting for the first data';
+
+  const notes = [];
+  if (!ercot || !ercot.reports || !Object.keys(ercot.reports).length) notes.push('ERCOT data has not been stored yet. The hourly job fills it within a few minutes of the next :03, :06 or :09.');
+  if (!metis || !metis.series || !metis.series['load:system']) notes.push('Metis data has not been stored yet. The hourly job fetches it around :38 and :48.');
+  if (metis && metis.complete === false) notes.push('A new Metis forecast is still being fetched; some series below may be one hour older than the rest until the next run.');
+  if (ercot && ercot.errors) for (const [id, e] of Object.entries(ercot.errors)) notes.push(`${ERCOT_NAMES[id] || id}: last fetch failed (${e.kind}); the figures shown are from its previous posting.`);
+  if (ercot && ercot.reports) for (const id of Object.keys(ERCOT_NAMES)) {
+    const r = ercot.reports[id];
+    if (r && r.missing_fields && r.missing_fields.length) notes.push(`${ERCOT_NAMES[id]}: ERCOT no longer sends ${r.missing_fields.join(', ')}; those values are blank, not zero.`);
+  }
+  const ready = ercot && ercot.reports && metis && metis.series && metis.series['load:system'];
+  if (!ready) {
+    showNotice(notes);
+    for (const id of ['summary', 'peak', 'strips', 'zones', 'checks']) document.getElementById(id).innerHTML = '';
+    return;
+  }
+  model = buildDrivers(ercot, metis, ui);
+  if (model) {
+    // The same measured on-schedule rule as the feed cards, so the two can never disagree.
+    const lateNote = (name, verb, ageMin, gap, st) => `${name} is ${st === 'stale' ? 'stale' : 'running late'}: ${verb} ${fmtAge(ageMin)} ago${gap ? ` (it usually arrives every ${gap} minutes)` : ''}, so differences involving it partly reflect its age.`;
+    for (const id of Object.keys(ERCOT_NAMES)) {
+      const r = ercot.reports[id];
+      if (!r) continue;
+      const age = (now - Date.parse(r.posted_utc)) / 60000, gap = typicalGapMinutes(ercot.history && ercot.history[id], 'posted_utc'), st = feedState(age, gap);
+      if (st === 'late' || st === 'stale') notes.push(lateNote(ERCOT_NAMES[id], 'posted', age, gap, st));
+    }
+    if (metis.issued_at) {
+      const age = (now - Date.parse(metis.issued_at)) / 60000, gap = typicalGapMinutes(metis.vintage_log, 'issued_at'), st = feedState(age, gap);
+      if (st === 'late' || st === 'stale') notes.push(lateNote('The Metis forecast', 'issued', age, gap, st));
+    }
+  }
+  showNotice(notes);
+  if (!model) return;
+  seg('segWindow', [[2, 'Next 2 h'], [12, '12 h'], [36, '36 h'], [47, 'All 47 h']], ui.windowHours, (v) => { ui.windowHours = v; renderAll(); });
+  seg('segWind', [['stwpf', 'STWPF'], ['wgrpp', 'WGRPP']], ui.windBasis, (v) => { ui.windBasis = v; renderAll(); });
+  seg('segSolar', [['stppf', 'STPPF'], ['pvgrpp', 'PVGRPP']], ui.solarBasis, (v) => { ui.solarBasis = v; renderAll(); });
+  seg('segOutage', [['resource', 'Resource'], ['resource_irr', '+ IRR']], ui.outageDef, (v) => { ui.outageDef = v; renderAll(); });
+  seg('segAvail', [['gen', 'Generation'], ['gen_load', '+ load res.']], ui.availDef, (v) => { ui.availDef = v; renderAll(); });
+  seg('segChart', [['load', 'Load'], ['wind', 'Wind'], ['solar', 'Solar'], ['outage', 'Outages'], ['avail', 'Available capacity'], ['imports', 'Net imports']], ui.chart, (v) => { ui.chart = v; renderAll(); });
+  renderSummary(now);
+  renderStrips(now);
+  renderChart();
+  renderZones(now);
+  renderChecks();
+}
+
+let lastKey = '';
+async function load() {
+  try {
+    const [e, m] = await Promise.all([fetchJson('data/ercot.json'), fetchJson('data/metis_fund.json')]);
+    const key = `${e && e.updated_at}|${m && m.updated_at}`;
+    ercot = e; metis = m;
+    showError('');
+    if (key !== lastKey) { lastKey = key; renderAll(); }
+  } catch (err) {
+    showError(`Could not load the fundamentals data: ${err.message}`);
+  }
+}
+
+document.getElementById('themeToggle').onclick = () => {
+  const next = ATGTheme.toggle();
+  document.getElementById('themeToggle').textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
+  if (ercot && metis) renderAll();
+};
+document.getElementById('themeToggle').textContent = ATGTheme.get() === 'dark' ? 'Light mode' : 'Dark mode';
+
+load().then(() => { if (!lastKey) renderAll(); });
+setInterval(load, 120000);                                   // pick up new data
+setInterval(() => { if (ercot || metis) renderAll(); }, 60000); // ages and the "next hours" window move with the clock
+</script>
+</body>
+</html>

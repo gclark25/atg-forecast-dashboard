@@ -21,6 +21,7 @@
 
 import nodesConfig from './config/nodes.json';
 import { pullAll, summarize, REPORTS as ERCOT_REPORTS } from './ercot.js';
+import { runErcotJob, runMetisJob } from './fundamentals.js';
 
 const BASE_URL = 'https://askthegrid.com';
 const FORECAST_PATH = '/api/v1/grid/forecasts';
@@ -336,7 +337,21 @@ async function pullAndStore(env) {
 const KV_ROUTES = {
   '/data/manifest.json': 'manifest',
   '/data/run_status.json': 'run_status',
+  '/data/ercot.json': 'ercot_state',      // ERCOT's own forecasts, written by runErcotJob
+  '/data/metis_fund.json': 'metis_fund',  // Metis's system feeds, written by runMetisJob
+  '/data/ercot_runs.json': 'ercot_runs',  // where each ERCOT run executed and how it ended
 };
+
+// Which scheduled job runs is decided by the minute the trigger fired:
+//   :05 :20 :35 :50          nodal price pull (unchanged)
+//   :03 :06 :09 :33          ERCOT's own forecasts, ONE group of reports per run so each run stays small
+//                            (:03 load+wind+solar, :06 system wind/solar+outage, :09 adequacy, :33 load again
+//                            because ERCOT posts the load forecast at :30; the rest post around :55 and :00)
+//   :38 :48 :58              Metis system feeds (issued at :00, available to us about :33); a new forecast is
+//                            fetched in two batches, one per run
+// All of it runs from the single cron expression in wrangler.toml; anything not listed below is the price pull.
+const ERCOT_JOB_GROUP_BY_MINUTE = { 3: 0, 6: 1, 9: 2, 33: 0 };
+const METIS_JOB_MINUTES = [38, 48, 58];
 
 // Node-latest requests (/data/<id>_latest.json) don't map to their own KV
 // key anymore -- all nodes live together in the single 'allLatest' key (see
@@ -505,6 +520,47 @@ async function handleErcotCheck(request, env) {
   });
 }
 
+// ---- A plain-text read-out of how the scheduled ERCOT runs have gone ----
+//
+// /debug/ercot-log (site password required) prints the run log as a table, a tally by the place each run
+// executed, and the most recent firewall block with the evidence kept from it. It exists so the question
+// "are the scheduled runs being blocked, and from where?" is one curl, not a pasted script.
+async function handleErcotLog(env) {
+  const read = async (k) => { try { return await env.FORECASTS_KV.get(k, 'json'); } catch (e) { return null; } };
+  const runsDoc = await read('ercot_runs');
+  const state = await read('ercot_state');
+  const runs = runsDoc && Array.isArray(runsDoc.runs) ? runsDoc.runs : [];
+  const lines = ['ERCOT scheduled-job log (newest first, times UTC)', ''];
+  if (!runs.length) {
+    lines.push('No runs recorded yet. Scheduled runs happen at :03 :06 :09 and :33 past each hour.');
+  } else {
+    lines.push('at (UTC)         grp  colo  loc  outcome     req     ms');
+    for (const r of runs) {
+      lines.push(`${String(r.at).slice(5, 19).replace('T', ' ')}  ${(r.groups || []).join(',').padEnd(3)}  ${String(r.colo ?? '?').padEnd(4)}  ${String(r.loc ?? '?').padEnd(3)}  ${String(r.outcome).padEnd(10)}  ${String(r.requests ?? '').padStart(3)}  ${String(r.ms ?? '').padStart(5)}${r.blocked && r.blocked.length ? `  blocked: ${r.blocked.join(',')}` : ''}`);
+    }
+    const tally = {};
+    for (const r of runs) {
+      const key = `${r.colo ?? '?'} ${r.loc ?? '?'}`;
+      const t = tally[key] || (tally[key] = { runs: 0, blocked: 0, other: 0 });
+      t.runs++;
+      if (r.outcome === 'blocked') t.blocked++;
+      else if (r.outcome !== 'updated' && r.outcome !== 'unchanged') t.other++;
+    }
+    lines.push('', 'By location:');
+    for (const [k, t] of Object.entries(tally).sort((a, b) => b[1].runs - a[1].runs)) {
+      lines.push(`  ${k.padEnd(8)} ${t.runs} runs, ${t.blocked} blocked, ${t.other} other errors`);
+    }
+  }
+  const lb = state && state.last_block;
+  lines.push('', lb ? `Most recent block: ${lb.at} on report "${lb.report}", run executing in ${lb.colo ?? '?'} ${lb.loc ?? '?'}` : 'No block has been recorded since this logging began.');
+  if (lb && lb.detail) {
+    lines.push(`  headers: ${JSON.stringify(lb.detail.headers || {})}`);
+    lines.push(`  page length: ${lb.detail.body_length}`);
+    lines.push(`  end of the page: ${String(lb.detail.body_tail || '').replace(/\s+/g, ' ').slice(-400)}`);
+  }
+  return new Response(lines.join('\n') + '\n', { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+}
+
 // ---- Site password gate (HTTP Basic) ----
 //
 // Every request to the site goes through fetch() below, and this check runs
@@ -572,7 +628,14 @@ async function checkSiteGate(request, env) {
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(pullAndStore(env));
+    const minute = new Date(event && event.scheduledTime).getUTCMinutes(); // NaN if there is no scheduled time
+    if (minute in ERCOT_JOB_GROUP_BY_MINUTE) {
+      ctx.waitUntil(runErcotJob(env, { groups: [ERCOT_JOB_GROUP_BY_MINUTE[minute]] }).then((r) => console.log('ercot job:', JSON.stringify(r))));
+    } else if (METIS_JOB_MINUTES.includes(minute)) {
+      ctx.waitUntil(runMetisJob(env).then((r) => console.log('metis job:', JSON.stringify(r))));
+    } else {
+      ctx.waitUntil(pullAndStore(env));
+    }
   },
 
   async fetch(request, env, ctx) {
@@ -593,6 +656,20 @@ export default {
 
     if (url.pathname === '/debug/ercot-check') {
       return handleErcotCheck(request, env);
+    }
+    if (url.pathname === '/debug/ercot-log') {
+      return handleErcotLog(env);
+    }
+
+    // Manual runs of the two scheduled jobs. Same protection as /debug/run-pull: the site password
+    // (the gate above) AND the askthegrid key in ?key=. Each run saves its progress as it goes, so if
+    // one is cut short (free plan CPU limit), running it again picks up where it left off.
+    if (url.pathname === '/debug/run-ercot' || url.pathname === '/debug/run-metis') {
+      if (url.searchParams.get('key') !== env.ASKTHEGRID_API_KEY) return jsonResponse({ error: 'bad_key' }, 403);
+      const g = url.searchParams.get('group'); // /debug/run-ercot?key=...&group=1 runs just the first group (1-3)
+      const groups = g && /^[1-3]$/.test(g) ? [Number(g) - 1] : undefined;
+      const result = url.pathname === '/debug/run-ercot' ? await runErcotJob(env, { groups }) : await runMetisJob(env);
+      return jsonResponse(result);
     }
 
     if (url.pathname === '/api/chat/status') {

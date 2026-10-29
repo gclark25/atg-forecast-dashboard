@@ -173,6 +173,18 @@ export async function getIdToken(env, f = fetch, nowMs = Date.now()) {
   return token;
 }
 
+function evidenceHeaders(headers) {
+  const keep = /^(server|via|x-cdn|x-iinfo|x-azure-ref|x-msedge-ref|x-served-by|cf-ray|content-type|retry-after)$/i;
+  const out = {};
+  try {
+    for (const [k, v] of headers.entries()) {
+      if (keep.test(k)) out[k.toLowerCase()] = String(v).slice(0, 120);
+      else if (/^set-cookie$/i.test(k)) out['set-cookie-names'] = [...String(v).matchAll(/(?:^|,\s*)([^=;,\s]+)=/g)].map((m) => m[1]).slice(0, 8).join(',');
+    }
+  } catch (err) { /* headers are best-effort evidence only */ }
+  return out;
+}
+
 async function ercotGet(path, params, env, opt) {
   const { f, sleep, retries = 2, timeoutMs = 20000 } = opt;
   const url = `${ERCOT_API_BASE}${path}?${new URLSearchParams(params)}`;
@@ -196,10 +208,17 @@ async function ercotGet(path, params, env, opt) {
     if (res.status === 200) {
       try { return await res.json(); } catch (e) { throw new ErcotError('bad_response', 'ERCOT returned a 200 that was not JSON'); }
     }
-    const text = (await res.text()).slice(0, 300);
+    const full = await res.text();
+    const text = full.slice(0, 300);
     if (res.status === 401 && !refreshed) { tokenCache = null; refreshed = true; continue; } // token may simply have expired
     if (res.status === 401) throw new ErcotError('auth', `ERCOT rejected the credentials (HTTP 401): ${text}`, 401);
-    if (res.status === 403) throw new ErcotError('blocked', `ERCOT refused the request (HTTP 403), which can mean the caller's network is outside the US: ${text}`, 403);
+    if (res.status === 403) {
+      // The reply to a block is a firewall page; keep the part that identifies it (its end) and the headers that name the
+      // product behind it, so a pattern can be read from the stored errors. Cookie VALUES are never kept, only their names.
+      const err = new ErcotError('blocked', `ERCOT refused the request (HTTP 403), which can mean the caller's network is outside the US or that a firewall rejected this address: ${text}`, 403);
+      err.detail = { headers: evidenceHeaders(res.headers), body_tail: full.length > 300 ? full.slice(-500) : '', body_length: full.length };
+      throw err;
+    }
     if (res.status === 429 || res.status >= 500) {
       if (attempt < retries) {
         const ra = Number(res.headers && res.headers.get && res.headers.get('Retry-After'));
@@ -381,7 +400,10 @@ export function normalizeRows(spec, rows, names, window = null) {
 }
 
 // ---------------------------------------------------------------------------
-// One report: find the newest posting, then read only that vintage
+// One report. First time: find the newest posting, then read only that vintage (2 requests).
+// Afterwards, when the caller passes `since[id]` (the posting it already holds): ONE request
+// asking only for anything posted after that. Nothing newer means an empty answer and nothing
+// is downloaded twice, which keeps the load on ERCOT's API as light as it can be.
 // ---------------------------------------------------------------------------
 export async function pullReport(id, env, opts = {}) {
   const spec = REPORTS[id];
@@ -391,44 +413,57 @@ export async function pullReport(id, env, opts = {}) {
   let requests = 0;
   const get = async (params) => { requests++; return bodyToTable(await ercotGet(spec.path, params, env, o)); };
   try {
-    // 1. newest posting, searching back 6 h and, failing that, 72 h
-    let newest = null;
-    for (const hours of [6, 72]) {
-      const first = await get({ postedDatetimeFrom: msToCtLocal(nowMs - hours * HOUR_MS), size: '1' });
-      if (first.rows.length) {
-        const p = first.rows[0];
-        newest = String(Array.isArray(p) ? p[first.names.indexOf('postedDatetime')] : p.postedDatetime);
-        break;
-      }
-    }
-    if (!newest) {
-      return { id, source: spec.source, ok: true, empty: true, requests, ms: Date.now() - started, intervals: [], missing_fields: [], note: 'no postings in the last 72 hours' };
-    }
-    // 2. that vintage only. An optional server-side filter is tried first and dropped if ERCOT rejects it or returns nothing.
-    const main = { postedDatetimeFrom: newest, size: '20000' };
-    let page = null;
     const opt = spec.optionalParam;
     const optKey = opt ? `${id}:${opt[0]}` : null;
-    if (opt && optionalParamOk.get(optKey) !== false) {
-      try {
-        const attempt = await get({ ...main, [opt[0]]: opt[1] });
-        if (attempt.rows.length) { page = attempt; optionalParamOk.set(optKey, true); } else optionalParamOk.set(optKey, false);
-      } catch (e) {
-        if (e.kind === 'http' && e.status === 400) optionalParamOk.set(optKey, false); else throw e;
+    if (opt && opts.knownFilter && opts.knownFilter[id] === true) optionalParamOk.set(optKey, true); // learned on an earlier run
+    const sinceStr = opts.since && opts.since[id];
+    let mainParams;
+    let page = null;
+    if (sinceStr) {
+      const sMs = ctLocalToMs(sinceStr);
+      mainParams = { postedDatetimeFrom: sMs === null ? sinceStr : msToCtLocal(sMs + 1000), size: '20000' };
+      if (opt && optionalParamOk.get(optKey) === true) mainParams[opt[0]] = opt[1]; // only a filter already known to work
+      page = await get(mainParams);
+      if (!page.rows.length) {
+        return { id, source: spec.source, ok: true, unchanged: true, posted_ct: sinceStr, requests, ms: Date.now() - started };
       }
+    } else {
+      // 1. newest posting, searching back 6 h and, failing that, 72 h
+      let newest = null;
+      for (const hours of [6, 72]) {
+        const first = await get({ postedDatetimeFrom: msToCtLocal(nowMs - hours * HOUR_MS), size: '1' });
+        if (first.rows.length) {
+          const p = first.rows[0];
+          newest = String(Array.isArray(p) ? p[first.names.indexOf('postedDatetime')] : p.postedDatetime);
+          break;
+        }
+      }
+      if (!newest) {
+        return { id, source: spec.source, ok: true, empty: true, requests, ms: Date.now() - started, intervals: [], missing_fields: [], note: 'no postings in the last 72 hours' };
+      }
+      // 2. that vintage only. An optional server-side filter is tried first and dropped if ERCOT rejects it or returns nothing.
+      mainParams = { postedDatetimeFrom: newest, size: '20000' };
+      if (opt && optionalParamOk.get(optKey) !== false) {
+        try {
+          const attempt = await get({ ...mainParams, [opt[0]]: opt[1] });
+          if (attempt.rows.length) { page = attempt; optionalParamOk.set(optKey, true); mainParams = { ...mainParams, [opt[0]]: opt[1] }; } else optionalParamOk.set(optKey, false);
+        } catch (e) {
+          if (e.kind === 'http' && e.status === 400) optionalParamOk.set(optKey, false); else throw e;
+        }
+      }
+      if (!page) page = await get(mainParams);
     }
-    if (!page) page = await get(main);
     let rows = page.rows;
     const names = page.names;
     for (let p = 2; p <= Math.min(Number(page.meta.totalPages) || 1, 4); p++) {
       await o.sleep(250);
-      const more = await get({ ...main, ...(optionalParamOk.get(optKey) ? { [opt[0]]: opt[1] } : {}), page: String(p) });
+      const more = await get({ ...mainParams, page: String(p) });
       rows = rows.concat(more.rows);
     }
-    // A newer vintage may have landed between the two calls; keep the newest posting only.
+    // Several vintages may be in the answer (or a newer one landed in between): keep the newest posting only.
     const pIdx = names.indexOf('postedDatetime');
     const posted = (r) => (Array.isArray(r) ? r[pIdx] : r.postedDatetime);
-    let newestStr = newest;
+    let newestStr = '';
     for (const r of rows) { const p = posted(r); if (typeof p === 'string' && p > newestStr) newestStr = p; }
     const vintage = rows.filter((r) => posted(r) === newestStr);
     const win = opts.window || {};
@@ -448,7 +483,7 @@ export async function pullReport(id, env, opts = {}) {
       server_side_filter: opt ? (optionalParamOk.get(optKey) ? 'used' : 'not available') : null,
     };
   } catch (e) {
-    return { id, source: spec.source, ok: false, requests, ms: Date.now() - started, error: { kind: e.kind || 'unexpected', status: e.status ?? null, message: String(e.message || e).slice(0, 300) } };
+    return { id, source: spec.source, ok: false, requests, ms: Date.now() - started, error: { kind: e.kind || 'unexpected', status: e.status ?? null, message: String(e.message || e).slice(0, 300), ...(e.detail ? { detail: e.detail } : {}) } };
   }
 }
 
@@ -483,6 +518,7 @@ export function findGaps(intervals, max = 5) {
 
 // A compact, credential-free summary of a pull, for the check route.
 export function summarize(result) {
+  if (result.ok && result.unchanged) return { ok: true, unchanged: true, requests: result.requests, posted_ct: result.posted_ct };
   if (!result.ok) return { ok: false, skipped: result.skipped || false, requests: result.requests, error: result.error };
   const iv = result.intervals;
   const first = iv[0];
