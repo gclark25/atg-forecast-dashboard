@@ -120,7 +120,7 @@ export async function runErcotJob(env, opts = {}) {
         state.errors[id] = { at: nowIso, kind: e.kind || 'unexpected', message: e.message || '', colo: trace ? trace.colo : null, loc: trace ? trace.loc : null, ...(e.detail ? { detail: e.detail } : {}) };
         summary.reports[id] = { status: 'error', error: state.errors[id] };
         if (e.kind === 'blocked' && !r.skipped) { // (the reports skipped after a refusal are not themselves the one refused) errors clear themselves when a report next succeeds, so the evidence also gets a home that persists
-          state.last_block = { at: nowIso, report: id, colo: trace ? trace.colo : null, loc: trace ? trace.loc : null, message: String(e.message || '').slice(0, 220), detail: e.detail || null };
+          state.last_block = { at: nowIso, report: id, via: opts.runner || 'worker', colo: trace ? trace.colo : null, loc: trace ? trace.loc : null, message: String(e.message || '').slice(0, 220), detail: e.detail || null };
         }
         if (e.kind === 'auth' || e.kind === 'blocked') stop = true; // asking again would only repeat the refusal
         changed = true;
@@ -168,7 +168,7 @@ export async function runErcotJob(env, opts = {}) {
   const bad = reps.find((r) => r.status === 'error');
   const runs = (await readState(env, ERCOT_RUNS_KEY)) || { runs: [] };
   runs.runs = [{
-    at: nowIso, groups: wanted.map((g) => g + 1), colo: trace ? trace.colo : null, loc: trace ? trace.loc : null,
+    at: nowIso, groups: wanted.map((g) => g + 1), colo: trace ? trace.colo : null, loc: trace ? trace.loc : null, via: opts.runner || 'worker',
     outcome: bad ? bad.error.kind : reps.some((r) => r.status === 'updated') ? 'updated' : 'unchanged', requests: summary.requests, ms: summary.ms,
     ...(Object.entries(summary.reports).some(([, r]) => r.status === 'error' && r.error.kind === 'blocked')
       ? { blocked: Object.entries(summary.reports).filter(([, r]) => r.status === 'error' && r.error.kind === 'blocked').map(([id]) => id) } : {}),

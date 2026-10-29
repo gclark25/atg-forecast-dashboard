@@ -54,6 +54,17 @@ run_worker_first = true
 binding = "FORECASTS_KV"
 id = "4039b25afa8140269a13d17e060624c6"
 
+# ERCOT's firewall refuses requests that leave Cloudflare outside the US, and a scheduled run can execute
+# anywhere (a run in Paris was refused). The ERCOT job therefore runs inside Durable Objects created with
+# North American location hints (see ErcotRunner in worker.js). Free plan: SQLite-backed classes only.
+[[durable_objects.bindings]]
+name = "ERCOT_RUNNER"
+class_name = "ErcotRunner"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ErcotRunner"]
+
 # Persists logs (including scheduled/cron invocation history) to the
 # dashboard so past runs are checkable after the fact, not just live via
 # `wrangler tail`. Currently set via the dashboard UI only -- adding it here

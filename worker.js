@@ -520,6 +520,51 @@ async function handleErcotCheck(request, env) {
   });
 }
 
+// ---- Running the ERCOT job from a US location ----
+//
+// ERCOT's firewall refuses requests that leave Cloudflare outside the US, and a Worker's scheduled run executes
+// wherever Cloudflare chooses (a run in Paris was refused; runs in Los Angeles and Miami were not). A Durable Object
+// is created in a region we name, and keeps running there, so the ERCOT job runs inside one. Two are kept, one per
+// half of the continent: if the first is refused the same run is repeated from the second. The run log records the
+// colo each run really executed in, so the placement is checked from data, not assumed.
+//
+// The Durable Object is only reachable through this Worker's binding, never from the internet.
+const ERCOT_RUNNERS = [['us-east', 'enam'], ['us-west', 'wnam']];
+
+export class ErcotRunner {
+  constructor(state, env) { this.env = env; }
+  async fetch(request) {
+    const url = new URL(request.url);
+    const groups = (url.searchParams.get('groups') || '').split(',').filter((x) => /^[0-2]$/.test(x)).map(Number);
+    const result = await runErcotJob(this.env, { groups: groups.length ? groups : undefined, runner: url.searchParams.get('runner') || 'runner' });
+    return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+  }
+}
+
+const wasBlocked = (s) => !!(s && s.reports && Object.values(s.reports).some((r) => r && r.status === 'error' && r.error && r.error.kind === 'blocked'));
+
+async function runErcotInUs(env, opts = {}) {
+  if (!env.ERCOT_RUNNER) return runErcotJob(env, { ...opts, runner: 'worker' }); // no binding (an older config): run here
+  const groups = opts.groups;
+  let last = null, threw = 0;
+  for (const [name, hint] of ERCOT_RUNNERS) {
+    try {
+      const stub = env.ERCOT_RUNNER.get(env.ERCOT_RUNNER.idFromName(name), { locationHint: hint });
+      const qs = new URLSearchParams({ runner: name });
+      if (groups && groups.length) qs.set('groups', groups.join(','));
+      const res = await stub.fetch(`https://ercot-runner.internal/run?${qs}`);
+      last = await res.json();
+      if (!wasBlocked(last)) return last; // done, or a failure another region cannot fix
+    } catch (e) {
+      threw++;
+      last = { ok: false, error: 'runner_failed', runner: name, message: String((e && e.message) || e).slice(0, 200) };
+    }
+  }
+  // Only when the Durable Objects themselves could not be reached at all: better to try here than to skip the run.
+  if (threw === ERCOT_RUNNERS.length) return runErcotJob(env, { ...opts, runner: 'worker-fallback' });
+  return last;
+}
+
 // ---- A plain-text read-out of how the scheduled ERCOT runs have gone ----
 //
 // /debug/ercot-log (site password required) prints the run log as a table, a tally by the place each run
@@ -534,25 +579,25 @@ async function handleErcotLog(env) {
   if (!runs.length) {
     lines.push('No runs recorded yet. Scheduled runs happen at :03 :06 :09 and :33 past each hour.');
   } else {
-    lines.push('at (UTC)         grp  colo  loc  outcome     req     ms');
+    lines.push('at (UTC)         grp  colo  via          outcome     req     ms');
     for (const r of runs) {
-      lines.push(`${String(r.at).slice(5, 19).replace('T', ' ')}  ${(r.groups || []).join(',').padEnd(3)}  ${String(r.colo ?? '?').padEnd(4)}  ${String(r.loc ?? '?').padEnd(3)}  ${String(r.outcome).padEnd(10)}  ${String(r.requests ?? '').padStart(3)}  ${String(r.ms ?? '').padStart(5)}${r.blocked && r.blocked.length ? `  blocked: ${r.blocked.join(',')}` : ''}`);
+      lines.push(`${String(r.at).slice(5, 19).replace('T', ' ')}  ${(r.groups || []).join(',').padEnd(3)}  ${String(r.colo ?? '?').padEnd(4)}  ${String(r.via ?? 'worker').padEnd(11)}  ${String(r.outcome).padEnd(10)}  ${String(r.requests ?? '').padStart(3)}  ${String(r.ms ?? '').padStart(5)}${r.blocked && r.blocked.length ? `  blocked: ${r.blocked.join(',')}` : ''}`);
     }
     const tally = {};
     for (const r of runs) {
-      const key = `${r.colo ?? '?'} ${r.loc ?? '?'}`;
+      const key = String(r.colo ?? '?');
       const t = tally[key] || (tally[key] = { runs: 0, blocked: 0, other: 0 });
       t.runs++;
       if (r.outcome === 'blocked') t.blocked++;
       else if (r.outcome !== 'updated' && r.outcome !== 'unchanged') t.other++;
     }
-    lines.push('', 'By location:');
+    lines.push('', 'By colo (the data centre the run executed in; the country Cloudflare lists for its own address is not where traffic exits, so it is not shown):');
     for (const [k, t] of Object.entries(tally).sort((a, b) => b[1].runs - a[1].runs)) {
-      lines.push(`  ${k.padEnd(8)} ${t.runs} runs, ${t.blocked} blocked, ${t.other} other errors`);
+      lines.push(`  ${k.padEnd(5)} ${t.runs} runs, ${t.blocked} blocked, ${t.other} other errors`);
     }
   }
   const lb = state && state.last_block;
-  lines.push('', lb ? `Most recent block: ${lb.at} on report "${lb.report}", run executing in ${lb.colo ?? '?'} ${lb.loc ?? '?'}` : 'No block has been recorded since this logging began.');
+  lines.push('', lb ? `Most recent block: ${lb.at} on report "${lb.report}", run executing in ${lb.colo ?? '?'} (via ${lb.via ?? 'worker'})` : 'No block has been recorded since this logging began.');
   if (lb && lb.detail) {
     lines.push(`  headers: ${JSON.stringify(lb.detail.headers || {})}`);
     lines.push(`  page length: ${lb.detail.body_length}`);
@@ -630,7 +675,7 @@ export default {
   async scheduled(event, env, ctx) {
     const minute = new Date(event && event.scheduledTime).getUTCMinutes(); // NaN if there is no scheduled time
     if (minute in ERCOT_JOB_GROUP_BY_MINUTE) {
-      ctx.waitUntil(runErcotJob(env, { groups: [ERCOT_JOB_GROUP_BY_MINUTE[minute]] }).then((r) => console.log('ercot job:', JSON.stringify(r))));
+      ctx.waitUntil(runErcotInUs(env, { groups: [ERCOT_JOB_GROUP_BY_MINUTE[minute]] }).then((r) => console.log('ercot job:', JSON.stringify(r))));
     } else if (METIS_JOB_MINUTES.includes(minute)) {
       ctx.waitUntil(runMetisJob(env).then((r) => console.log('metis job:', JSON.stringify(r))));
     } else {
@@ -668,7 +713,7 @@ export default {
       if (url.searchParams.get('key') !== env.ASKTHEGRID_API_KEY) return jsonResponse({ error: 'bad_key' }, 403);
       const g = url.searchParams.get('group'); // /debug/run-ercot?key=...&group=1 runs just the first group (1-3)
       const groups = g && /^[1-3]$/.test(g) ? [Number(g) - 1] : undefined;
-      const result = url.pathname === '/debug/run-ercot' ? await runErcotJob(env, { groups }) : await runMetisJob(env);
+      const result = url.pathname === '/debug/run-ercot' ? await runErcotInUs(env, { groups }) : await runMetisJob(env);
       return jsonResponse(result);
     }
 

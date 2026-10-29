@@ -77,6 +77,9 @@
   html[data-theme="dark"] .sig.bull.weak { color: var(--bull); }
   html[data-theme="dark"] .sig.bear.weak { color: var(--bear); }
   .peak { margin-top: 12px; font-size: 13px; line-height: 1.6; }
+  .offset-note { display: none; font-size: 12px; line-height: 1.55; margin: 0 0 12px; padding: 8px 12px; border-radius: 6px; border-left: 4px solid var(--late); background: var(--warn-bg); color: var(--warn-text); }
+  .offset-note.show { display: block; }
+  .muted { color: var(--text-secondary); font-size: 11px; font-weight: 400; display: block; }
 
   /* hourly strips */
   table.strip { border-collapse: separate; border-spacing: 0; font-size: 11px; table-layout: fixed; }
@@ -137,8 +140,11 @@
     <div class="grp">Solar basis <span class="seg" id="segSolar"></span></div>
     <div class="grp">Outages <span class="seg" id="segOutage"></span></div>
     <div class="grp">Capacity <span class="seg" id="segAvail"></span></div>
+    <div class="grp">Steady offsets (outages, capacity) <span class="seg" id="segOffsets"></span></div>
+    <div class="grp">Tightness adds outages <span class="seg" id="segTight"></span></div>
   </div>
-  <p class="hint">&Delta; = Metis median minus ERCOT's forecast. The signal compares that gap with Metis's own uncertainty (the p10 to p90 spread, as a standard deviation), averaged over the window: within 0.4 is in line, 0.4 to 1.0 leaning, over 1.0 strong. Tightness adds the net load and outage gaps. It leaves out available capacity and reserve margin, which already net those effects, so they are shown beside it as cross-checks instead of being added in.</p>
+  <p class="hint">&Delta; = Metis median minus ERCOT's forecast. The signal compares that gap with Metis's own uncertainty (the p10 to p90 spread, as a standard deviation), averaged over the window: within 0.4 is in line, 0.4 to 1.0 leaning, over 1.0 strong. Tightness is the net-load gap. Outages are left out of it by default, because Metis's outage number sits above ERCOT's figure in nearly every hour, by an amount that is not constant, even though both use the same definition; that looks like a modelling difference rather than a tightness signal. The control above adds them. Available capacity and reserve margin already net those effects, so they are shown beside it as cross-checks instead of being added in. The wind, solar, outage and capacity choices start on the closest match the self-checks find.</p>
+  <div class="offset-note" id="offsetNote"></div>
   <div id="summary"></div>
   <div class="peak" id="peak"></div>
 </div>
@@ -174,6 +180,8 @@
     <li><strong>Timing.</strong> Metis timestamps its hours by their start, and ERCOT's hour-ending rows are converted to the same start, so a Metis 4:00 PM point is compared with ERCOT's HE17. The alignment check below confirms this from the data.</li>
     <li><strong>Different vintages.</strong> The two sides are issued on different schedules (Metis hourly from :00, ERCOT's reports around :55, :00 and :30), so part of any gap is simply newer information on one side. The feed health card shows how old each side is.</li>
     <li><strong>Percentiles.</strong> In the hour-by-hour tooltips, "sits at Metis p23" means ERCOT's number falls at the 23rd percentile of Metis's own forecast distribution for that hour. That is the strength of the signal for the system-level rows, which carry all 21 quantile levels.</li>
+    <li><strong>What Metis is.</strong> Per the vendor (Oct 29), Metis is primarily a price model. Its load, wind, solar, outage and capacity forecasts come out as by-products of the same output head, which does not know which target it is predicting or the hour of day. Treat a gap as a prompt to look, not a trade signal, until these forecasts have been scored against actuals.</li>
+    <li><strong>What Metis uses.</strong> Outages: the sum of ERCOT's four zonal Total Resource MW columns (NP3-233-CD), without IRR or new-equipment outages. Capacity: the sum of the four zonal CapGenRes columns (NP3-763-CD), not availCapGen, with ERCOT's own value from the report issued an hour earlier as the label. The self-checks above test these.</li>
     <li><strong>Not covered.</strong> Metis's net imports have no ERCOT forecast to compare with, so they appear only in the curve chart.</li>
   </ul>
 </div>
@@ -243,20 +251,74 @@ function pairAt(mp, e, sign) {
   return { t: mp.t, metis: mp.p50, p10: mp.p10, p90: mp.p90, ercot: e, delta, sigma: mp.sigma, z: (sign * delta) / mp.sigma, pct: pctInLevels(mp.q, mp.i, e), sign };
 }
 
-// ---- the hourly drivers, on Metis's own 47-hour grid ----
-function outageValue(rep, suffix, withIrr, t) {
-  const r = ercotVal(rep, 'resource_' + suffix, t);
-  if (r === null) return null;
-  if (!withIrr) return r;
-  const irr = ercotVal(rep, 'irr_' + suffix, t);
-  return irr === null ? null : r + irr;
+// ---- steady offsets: a gap that is the same size in nearly every hour is a definition, not a forecast ----
+// Measured over the FIRST `hours` hours with data (the page uses the next 12), when both forecasts are closest to what is
+// actually happening, then held for the rest of the horizon. That keeps a real change later on (a step in outages the
+// next day, say) from being absorbed into the offset. Flagged when at least 90% of those gaps share the median's sign and
+// the median is at least 0.6 of Metis's typical uncertainty. Needs 12 hours of data (8 when a window is given).
+const OFFSET_HOURS = 12;
+// Only outages, capacity and the reserve margin built from it are eligible, because a standing one-sided gap there reflects how the number is produced, not a view. Load, wind and solar are the same physical
+// quantity on both sides, so a steady gap there is a genuine disagreement and must stay visible.
+const OFFSET_DRIVERS = ['outage', 'avail']; // the reserve margin is derived from capacity: it inherits the capacity offset only (see buildDrivers)
+function steadyOffset(arr, hours = Infinity) {
+  const ds = [], ss = [];
+  for (const p of arr) {
+    if (!p) continue;
+    if (ds.length >= hours) break;
+    ds.push(p.rawDelta !== undefined ? p.rawDelta : p.delta); ss.push(p.sigma);
+  }
+  if (ds.length < (hours === Infinity ? 12 : Math.min(8, hours))) return null;
+  const med = median(ds), sMed = median(ss);
+  if (!Number.isFinite(med) || med === 0) return null;
+  const same = ds.filter((d) => Math.sign(d) === Math.sign(med)).length / ds.length;
+  return same >= 0.9 && Math.abs(med) >= 0.6 * sMed ? { offset: med, consistency: same, n: ds.length, sigma: sMed } : null;
 }
+function applyOffset(arr, offset) {
+  for (const p of arr) {
+    if (!p) continue;
+    p.rawDelta = p.delta; p.offset = offset;
+    p.delta = p.delta - offset;
+    p.z = (p.sign * p.delta) / p.sigma;
+  }
+}
+
+// ---- the hourly drivers, on Metis's own 47-hour grid ----
+// mode: 'resource' (ERCOT's resource outages), 'resource_new' (+ new-equipment outages), 'resource_irr' (+ renewable
+// outages) or 'all'. A value is only returned when every part of it is present, never a quietly partial sum.
+function outageValue(rep, suffix, mode, t) {
+  if (mode === true) mode = 'resource_irr';
+  if (!mode) mode = 'resource';
+  let v = ercotVal(rep, 'resource_' + suffix, t);
+  if (v === null) return null;
+  if (mode === 'resource_irr' || mode === 'all') { const x = ercotVal(rep, 'irr_' + suffix, t); if (x === null) return null; v += x; }
+  if (mode === 'resource_new' || mode === 'all') { const x = ercotVal(rep, 'new_equip_' + suffix, t); if (x === null) return null; v += x; }
+  return v;
+}
+// def: 'zones' = the sum of ERCOT's four zonal CapGenRes columns (what the vendor says it uses), 'total' = the CapGenRes
+// total column, 'gen' = availCapGen, 'gen_load' = availCapGen + CapLoadRes. A value needs every part, never a partial sum.
+const CAP_ZONES = ['south', 'north', 'west', 'houston'];
+const NIGHT_MW = 5; // ERCOT solar forecast at or below this counts as night
 function availValue(rep, def, t) {
+  if (def === 'zones') {
+    let sum = 0;
+    for (const z of CAP_ZONES) { const v = ercotVal(rep, 'cap_gen_res_' + z, t); if (v === null) return null; sum += v; }
+    return sum;
+  }
+  if (def === 'total') return ercotVal(rep, 'cap_gen_res', t);
   const g = ercotVal(rep, 'avail_cap_gen', t);
   if (g === null) return null;
   if (def !== 'gen_load') return g;
   const l = ercotVal(rep, 'cap_load_res', t);
   return l === null ? null : g + l;
+}
+// ERCOT's own reserve margin is availCapGen - load. For the vendor's capacity figure the matching reserve is that
+// capacity minus ERCOT's load forecast for the hour.
+function ercotReserve(R, def, t) {
+  if (def === 'zones' || def === 'total') {
+    const cap = availValue(R.adequacy, def, t), load = ercotVal(R.load, 'system', t);
+    return cap === null || load === null ? null : cap - load;
+  }
+  return ercotVal(R.adequacy, 'avail_cap_res', t);
 }
 function buildDrivers(ercot, metis, opts) {
   const S = (k) => (metis.series && metis.series[k]) || null;
@@ -265,38 +327,59 @@ function buildDrivers(ercot, metis, opts) {
   const grid = Lser.start;
   const R = ercot.reports || {};
   const windRep = pickNewest(R.wind_system, R.wind), solarRep = pickNewest(R.solar_system, R.solar);
-  const out = { load: [], wind: [], solar: [], net: [], outage: [], tight: [], avail: [], rm: [] };
+  // pass 1: each driver on its own, as raw gaps
+  const raw = { load: [], wind: [], solar: [], outage: [], avail: [], rm: [] };
   for (let i = 0; i < grid.length; i++) {
     const t = grid[i];
     const mL = metisPoint(Lser, i), mW = metisPoint(S('wind:system'), i), mS = metisPoint(S('solar:system'), i);
     const mO = metisPoint(S('outage:system'), i), mA = metisPoint(S('avail_cap:system'), i);
-    const load = pairAt(mL, ercotVal(R.load, 'system', t), +1);
-    const wind = pairAt(mW, ercotVal(windRep, 'system_' + opts.windBasis, t), -1);
-    const solar = pairAt(mS, ercotVal(solarRep, 'system_' + opts.solarBasis, t), -1);
-    const outage = pairAt(mO, outageValue(R.outage, 'system', opts.outageDef === 'resource_irr', t), +1);
-    const avail = pairAt(mA, availValue(R.adequacy, opts.availDef, t), -1);
-    let net = null, tight = null, rm = null;
+    raw.load.push(pairAt(mL, ercotVal(R.load, 'system', t), +1));
+    raw.wind.push(pairAt(mW, ercotVal(windRep, 'system_' + opts.windBasis, t), -1));
+    const eSolar = ercotVal(solarRep, 'system_' + opts.solarBasis, t);
+    let sp = pairAt(mS, eSolar, -1);
+    // At night ERCOT forecasts no solar. The vendor says its model has no notion of the hour of day, so any small
+    // non-zero or negative value there is an artefact, not a view; the gap is not scored (and a negative is clipped to 0).
+    if (sp && opts.nightMask && eSolar <= NIGHT_MW) sp = { ...sp, metis: Math.max(sp.metis, 0), delta: 0, rawDelta: 0, z: 0, pct: null, night: true };
+    raw.solar.push(sp);
+    raw.outage.push(pairAt(mO, outageValue(R.outage, 'system', opts.outageDef, t), +1));
+    raw.avail.push(pairAt(mA, availValue(R.adequacy, opts.availDef, t), -1));
+    const eRm = ercotReserve(R, opts.availDef, t);
+    if (mA && mL && eRm !== null) {
+      const metisRm = mA.p50 - mL.p50, delta = metisRm - eRm, sigma = Math.sqrt(mA.sigma ** 2 + mL.sigma ** 2);
+      raw.rm.push({ t, metis: metisRm, ercot: eRm, delta, rawDelta: delta, offset: 0, sigma, z: -delta / sigma, pct: null, sign: -1 });
+    } else raw.rm.push(null);
+  }
+  // pass 2: remove steady offsets (when asked), THEN build net load and tightness from the adjusted parts
+  const offsets = {};
+  if (opts.removeOffsets) {
+    for (const k of OFFSET_DRIVERS) {
+      const o = steadyOffset(raw[k], OFFSET_HOURS);
+      if (o) { offsets[k] = o; applyOffset(raw[k], o.offset); }
+    }
+    // The reserve margin is capacity minus load. It inherits the capacity offset and nothing else: a steady disagreement
+    // about LOAD flows into it and has to stay visible.
+    if (offsets.avail) { applyOffset(raw.rm, offsets.avail.offset); offsets.rm = { ...offsets.avail, derived: true }; }
+  }
+  const out = { ...raw, net: [], tight: [] };
+  for (let i = 0; i < grid.length; i++) {
+    const t = grid[i], load = raw.load[i], wind = raw.wind[i], solar = raw.solar[i], outage = raw.outage[i];
+    let net = null, tight = null;
     if (load && wind && solar) {
       const delta = load.delta - wind.delta - solar.delta;
       const sigma = Math.sqrt(load.sigma ** 2 + wind.sigma ** 2 + solar.sigma ** 2);
       net = { t, metis: load.metis - wind.metis - solar.metis, ercot: load.ercot - wind.ercot - solar.ercot, delta, sigma, z: delta / sigma, pct: null, sign: +1 };
     }
-    if (net && outage) {
+    // Tightness is the net-load gap, plus the outage gap unless opts.tightOutages is false.
+    if (net && opts.tightOutages === false) {
+      tight = { t, metis: null, ercot: null, delta: net.delta, sigma: net.sigma, z: net.delta / net.sigma, pct: null, sign: +1 };
+    } else if (net && outage) {
       const delta = net.delta + outage.delta;
       const sigma = Math.sqrt(net.sigma ** 2 + outage.sigma ** 2);
       tight = { t, metis: null, ercot: null, delta, sigma, z: delta / sigma, pct: null, sign: +1 };
     }
-    const eRm = ercotVal(R.adequacy, 'avail_cap_res', t);
-    if (mA && mL && eRm !== null) {
-      const metisRm = mA.p50 - mL.p50;
-      const delta = metisRm - eRm;
-      const sigma = Math.sqrt(mA.sigma ** 2 + mL.sigma ** 2);
-      rm = { t, metis: metisRm, ercot: eRm, delta, sigma, z: -delta / sigma, pct: null, sign: -1 };
-    }
-    out.load.push(load); out.wind.push(wind); out.solar.push(solar); out.net.push(net);
-    out.outage.push(outage); out.tight.push(tight); out.avail.push(avail); out.rm.push(rm);
+    out.net.push(net); out.tight.push(tight);
   }
-  return { grid, drivers: out, windRep, solarRep };
+  return { grid, drivers: out, windRep, solarRep, offsets };
 }
 
 // ---- windows and signals ----
@@ -361,12 +444,37 @@ function definitionFit(series, candidates) {
       if (m === null || m === undefined || e === null || e === undefined) continue;
       n++; sa += Math.abs(m - e); sb += m - e;
     }
-    return { label: c.label, key: c.key, n, mad: n ? sa / n : null, bias: n ? sb / n : null };
+    const mad = n ? sa / n : null, bias = n ? sb / n : null;
+    return { label: c.label, key: c.key, n, mad, bias, steady: n >= 12 && mad !== null && mad > 0 && Math.abs(bias) >= 0.95 * mad };
   });
   const ok = rows.filter((r) => r.mad !== null);
   if (!ok.length) return { rows, best: null, decisive: false };
-  const sorted = ok.slice().sort((a, b) => a.mad - b.mad);
+  // compared at 0.01 MW so floating-point rounding can never decide a tie; on a tie the earlier candidate wins (stable sort)
+  const sorted = ok.slice().sort((a, b) => Math.round(a.mad * 100) - Math.round(b.mad * 100));
   return { rows, best: sorted[0].key, decisive: sorted.length < 2 || sorted[0].mad < 0.7 * sorted[1].mad };
+}
+
+// The closest definition for each quantity, where one clearly wins. Used once to pre-set the toggles.
+function candidateSets(ercot, metis) {
+  const R = ercot.reports || {}, windRep = pickNewest(R.wind_system, R.wind), solarRep = pickNewest(R.solar_system, R.solar);
+  const g = (rep, key) => (t) => ercotVal(rep, key, t);
+  return {
+    windBasis: [{ key: 'stwpf', label: 'STWPF', get: g(windRep, 'system_stwpf') }, { key: 'wgrpp', label: 'WGRPP', get: g(windRep, 'system_wgrpp') }],
+    solarBasis: [{ key: 'stppf', label: 'STPPF', get: g(solarRep, 'system_stppf') }, { key: 'pvgrpp', label: 'PVGRPP', get: g(solarRep, 'system_pvgrpp') }],
+    outageDef: ['resource', 'resource_new', 'resource_irr', 'all'].map((m) => ({ key: m, label: m, get: (t) => outageValue(R.outage, 'system', m, t) })),
+    availDef: ['zones', 'total', 'gen', 'gen_load'].map((k) => ({ key: k, label: k, get: (t) => availValue(R.adequacy, k, t) })),
+    series: { windBasis: 'wind:system', solarBasis: 'solar:system', outageDef: 'outage:system', availDef: 'avail_cap:system' },
+  };
+}
+function bestDefinitions(ercot, metis) {
+  const c = candidateSets(ercot, metis), out = {};
+  for (const k of ['windBasis', 'solarBasis', 'outageDef', 'availDef']) {
+    const ser = metis.series && metis.series[c.series[k]];
+    if (!ser) continue;
+    const f = definitionFit(ser, c[k]);
+    if (f.best && f.decisive) out[k] = f.best;
+  }
+  return out;
 }
 
 // ---- feed health ----
@@ -399,7 +507,9 @@ const ERCOT_NAMES = {
   load: 'ERCOT load forecast', wind: 'ERCOT wind, by region', wind_system: 'ERCOT wind, system',
   solar: 'ERCOT solar, by region', solar_system: 'ERCOT solar, system', outage: 'ERCOT resource outages', adequacy: 'ERCOT adequacy (capacity)',
 };
-const ui = { windowHours: 36, windBasis: 'stwpf', solarBasis: 'stppf', outageDef: 'resource', availDef: 'gen', chart: 'load' };
+const ui = { windowHours: 36, windBasis: 'stwpf', solarBasis: 'stppf', outageDef: 'resource', availDef: 'zones', offsets: 'remove', tightOutages: false, chart: 'load', autoApplied: false };
+const drvOpts = () => ({ ...ui, removeOffsets: ui.offsets === 'remove', tightOutages: ui.tightOutages, nightMask: true });
+const tightLabel = () => (ui.tightOutages ? 'Tightness (net load + outages)' : 'Tightness (net load only)');
 let ercot = null, metis = null, model = null, chart = null;
 
 const CT_DATE = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -506,13 +616,32 @@ const DRIVER_ROWS = [
   ['rm', 'Reserve margin (cross-check)', 'MW'], ['avail', 'Available capacity (cross-check)', 'MW'],
 ];
 
+function offsetNoteFor(key) {
+  const o = model.offsets || {};
+  if (o[key]) return `offset ${fmtSigned(o[key].offset)} MW removed`;
+  if (key === 'tight' && o.outage && ui.tightOutages) return 'built from the offset-adjusted outage gap';
+  return '';
+}
 function renderSummary(now) {
   const idx = windowIndices(model.grid, now, ui.windowHours);
-  const rows = DRIVER_ROWS.map(([key, label]) => {
+  const names = { load: 'Load', wind: 'Wind', solar: 'Solar', outage: 'Outages', avail: 'Available capacity', rm: 'Reserve margin' };
+  const noteEl = document.getElementById('offsetNote');
+  const found = Object.entries(model.offsets || {});
+  if (ui.offsets === 'remove' && found.length) {
+    noteEl.innerHTML = `<strong>Steady offsets removed:</strong> ${found.map(([k, o]) => `${esc(names[k])} ${fmtSigned(o.offset)} MW${o.derived ? ' (the capacity offset, carried through)' : ''}`).join('; ')}. In each of these the gap kept the same sign in at least 90% of the next ${OFFSET_HOURS} hours, when both forecasts are closest to what is actually happening. That is a standing difference in what the two numbers represent, not a forecast disagreement, so the offset is held constant and only the changes around it are scored. For outages Metis uses the same ERCOT figure we do, so the likeliest cause is that it forecasts outages as they will later be reported, including ones not scheduled yet (not confirmed). Load, wind and solar are never adjusted: they are the same quantity on both sides. Choose <em>Raw gaps</em> to see the unadjusted numbers.`;
+    noteEl.classList.add('show');
+  } else if (ui.offsets === 'keep') {
+    noteEl.textContent = 'Raw gaps: nothing is adjusted. A steady gap that comes from how each side defines a quantity will read as a signal.';
+    noteEl.classList.add('show');
+  } else { noteEl.textContent = ''; noteEl.classList.remove('show'); }
+  const rows = DRIVER_ROWS.map(([key, label0]) => {
+    const label = key === 'tight' ? tightLabel() : label0;
     const st = windowStats(model.drivers[key], idx);
     const key2 = key === 'tight' ? ' class="key"' : '';
-    if (!st) return `<tr${key2}><td>${esc(label)}</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td><span class="sig none">no overlapping hours</span></td><td class="num">0</td></tr>`;
-    return `<tr${key2}><td>${esc(label)}</td><td class="num">${fmtInt(st.metis)}</td><td class="num">${fmtInt(st.ercot)}</td><td class="num">${fmtSigned(st.delta)}</td><td>${signalHtml(st.z)}</td><td class="num">${st.n}/${st.hours}</td></tr>`;
+    const note = ui.offsets === 'remove' ? offsetNoteFor(key) : '';
+    const labelHtml = `${esc(label)}${note ? `<span class="muted">${esc(note)}</span>` : ''}`;
+    if (!st) return `<tr${key2}><td>${labelHtml}</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td><span class="sig none">no overlapping hours</span></td><td class="num">0</td></tr>`;
+    return `<tr${key2}><td>${labelHtml}</td><td class="num">${fmtInt(st.metis)}</td><td class="num">${fmtInt(st.ercot)}</td><td class="num">${fmtSigned(st.delta)}</td><td>${signalHtml(st.z)}</td><td class="num">${st.n}/${st.hours}</td></tr>`;
   });
   document.getElementById('summary').innerHTML = `<table class="t"><thead><tr><th>Driver</th><th class="num">Metis avg (MW)</th><th class="num">ERCOT avg (MW)</th><th class="num">&Delta; (MW)</th><th>Signal</th><th class="num">Hours</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
 
@@ -522,7 +651,7 @@ function renderSummary(now) {
   const p = model.drivers.tight[pk], t = model.grid[pk];
   const comp = (k) => { const q = model.drivers[k][pk]; return q ? fmtSigned(q.delta) : '-'; };
   el.innerHTML = `<strong>Peak tightness hour in this window:</strong> ${esc(fmtDayTime(t))} (HE${ctHE(t)}), where Metis is ${fmtSigned(p.delta)} MW tighter than ERCOT overall `
-    + `(load ${comp('load')}, wind ${comp('wind')}, solar ${comp('solar')}, outages ${comp('outage')} MW). ${signalHtml(p.z)}`;
+    + `(load ${comp('load')}, wind ${comp('wind')}, solar ${comp('solar')}${ui.tightOutages ? `, outages ${comp('outage')}` : ''} MW). ${signalHtml(p.z)}`;
 }
 
 function tipFor(label, p, t) {
@@ -530,6 +659,8 @@ function tipFor(label, p, t) {
   const parts = [`${fmtDayTime(t)} (HE${ctHE(t)})`, label];
   if (p.metis !== null) parts.push(`Metis ${fmtInt(p.metis)} MW` + (p.p10 !== undefined ? ` (p10 to p90 ${fmtInt(p.p10)} to ${fmtInt(p.p90)})` : ''));
   if (p.ercot !== null) parts.push(`ERCOT ${fmtInt(p.ercot)} MW` + (p.pct !== null && p.pct !== undefined ? `, which sits at Metis ${pctText(p.pct)}` : ''));
+  if (p.night) parts.push('Night hour: ERCOT forecasts no solar, and Metis\'s model has no notion of night (vendor), so this gap is not scored');
+  if (p.offset) parts.push(`Raw gap ${fmtSigned(p.rawDelta)} MW, minus the steady offset of ${fmtSigned(p.offset)} MW`);
   parts.push(`Gap ${fmtSigned(p.delta)} MW = ${(p.z >= 0 ? '+' : '\u2212') + Math.abs(p.z).toFixed(2)} Metis standard deviations (${classify(p.z).label.toLowerCase()})`);
   return parts.join('\n');
 }
@@ -548,7 +679,8 @@ function renderStrips(now) {
   html += `</tr><tr><th class="lab" style="font-weight:500;color:var(--text-secondary)">Hour ending (CT)</th>`;
   grid.forEach((t, i) => { html += `<th class="hdr${dayStart.has(i) ? ' day-start' : ''}">${ctHE(t)}</th>`; });
   html += `</tr></thead><tbody>`;
-  for (const [key, label] of DRIVER_ROWS) {
+  for (const [key, label0] of DRIVER_ROWS) {
+    const label = key === 'tight' ? tightLabel() : label0;
     html += `<tr><th class="lab">${esc(label.replace(/ \(.*\)$/, ''))}</th>`;
     grid.forEach((t, i) => {
       const p = model.drivers[key][i];
@@ -570,8 +702,8 @@ function chartSpec(which) {
     case 'load': return { title: 'Load', metis: S['load:system'], lines: [{ label: 'ERCOT load forecast', fn: get(R.load, 'system') }] };
     case 'wind': return { title: 'Wind generation', metis: S['wind:system'], lines: [{ label: 'ERCOT STWPF', fn: get(model.windRep, 'system_stwpf') }, { label: 'ERCOT WGRPP', fn: get(model.windRep, 'system_wgrpp'), dash: true }] };
     case 'solar': return { title: 'Solar generation', metis: S['solar:system'], lines: [{ label: 'ERCOT STPPF', fn: get(model.solarRep, 'system_stppf') }, { label: 'ERCOT PVGRPP', fn: get(model.solarRep, 'system_pvgrpp'), dash: true }] };
-    case 'outage': return { title: 'Outage capacity', metis: S['outage:system'], lines: [{ label: 'ERCOT resource outages', fn: (t) => outageValue(R.outage, 'system', false, t) }, { label: 'ERCOT resource + IRR', fn: (t) => outageValue(R.outage, 'system', true, t), dash: true }] };
-    case 'avail': return { title: 'Available capacity', metis: S['avail_cap:system'], lines: [{ label: 'ERCOT available capacity (gen)', fn: (t) => availValue(R.adequacy, 'gen', t) }, { label: 'ERCOT gen + load resources', fn: (t) => availValue(R.adequacy, 'gen_load', t), dash: true }] };
+    case 'outage': return { title: 'Outage capacity', metis: S['outage:system'], lines: [{ label: 'ERCOT resource outages', fn: (t) => outageValue(R.outage, 'system', 'resource', t) }, { label: 'ERCOT resource + new equipment', fn: (t) => outageValue(R.outage, 'system', 'resource_new', t), dash: true }, { label: 'ERCOT resource + IRR', fn: (t) => outageValue(R.outage, 'system', 'resource_irr', t), dot: true }] };
+    case 'avail': return { title: 'Available capacity', metis: S['avail_cap:system'], lines: [{ label: 'ERCOT CapGenRes (sum of zones)', fn: (t) => availValue(R.adequacy, 'zones', t) }, { label: 'ERCOT availCapGen', fn: (t) => availValue(R.adequacy, 'gen', t), dash: true }, { label: 'ERCOT availCapGen + load resources', fn: (t) => availValue(R.adequacy, 'gen_load', t), dot: true }] };
     case 'imports': return { title: 'Net imports (Metis only: ERCOT publishes no forecast)', metis: S['net_imports:system'], lines: [] };
     default: return null;
   }
@@ -584,14 +716,14 @@ function renderChart() {
   if (!spec || !spec.metis) { note.textContent = 'No data for this series yet.'; return; }
   const s = spec.metis, dark = document.documentElement.getAttribute('data-theme') === 'dark';
   const tick = dark ? '#9ca3af' : '#6b7280', grid = dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
-  const metisCol = dark ? '#8fb3ff' : '#1f3864', ercotCols = dark ? ['#f0a04b', '#e46a6a'] : ['#b45309', '#c00000'];
+  const metisCol = dark ? '#8fb3ff' : '#1f3864', ercotCols = dark ? ['#f0a04b', '#e46a6a', '#9ca3af'] : ['#b45309', '#c00000', '#6b7280'];
   // every second hour is labelled, plus the first hour of each day with its date, so a new day is never skipped
   const labels = s.start.map((t, i) => { const he = ctHE(t); const first = i === 0 || ctDateKey(s.start[i - 1]) !== ctDateKey(t); const text = first || he % 2 === 0 ? String(he) : ''; return first ? [text, CT_DAY.format(new Date(t)).slice(5)] : text; });
   const datasets = [
     { label: 'Metis p10 to p90', data: s.q.p90, borderColor: 'rgba(120,150,230,0.0)', backgroundColor: dark ? 'rgba(120,150,230,0.18)' : 'rgba(31,56,100,0.12)', fill: '+1', pointRadius: 0 },
     { label: 'Metis p10', data: s.q.p10, borderColor: 'rgba(120,150,230,0.0)', fill: false, pointRadius: 0 },
     { label: 'Metis median', data: s.q.p50, borderColor: metisCol, backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0 },
-    ...spec.lines.map((l, k) => ({ label: l.label, data: s.start.map((t) => l.fn(t)), borderColor: ercotCols[k], backgroundColor: 'transparent', borderWidth: 2, borderDash: l.dash ? [6, 4] : [], pointRadius: 0, spanGaps: false })),
+    ...spec.lines.map((l, k) => ({ label: l.label, data: s.start.map((t) => l.fn(t)), borderColor: ercotCols[k], backgroundColor: 'transparent', borderWidth: 2, borderDash: l.dash ? [6, 4] : l.dot ? [2, 3] : [], pointRadius: 0, spanGaps: false })),
   ];
   chart = new Chart(document.getElementById('detailChart'), {
     type: 'line', data: { labels, datasets },
@@ -612,24 +744,27 @@ function renderZones(now) {
     { title: 'Load by weather zone', key: 'load', sign: +1, zones: ['coast', 'east', 'far_west', 'north', 'north_central', 'south_central', 'southern', 'west'], get: (z) => (t) => ercotVal(R.load, z, t) },
     { title: 'Wind by region', key: 'wind', sign: -1, zones: ['coastal', 'north', 'panhandle', 'south', 'west'], get: (z) => (t) => ercotVal(R.wind, `${z}_${ui.windBasis}`, t) },
     { title: 'Solar by region', key: 'solar', sign: -1, zones: ['center_east', 'center_west', 'far_east', 'far_west', 'north_west', 'south_east'], get: (z) => (t) => ercotVal(R.solar, `${z}_${ui.solarBasis}`, t) },
-    { title: 'Outages by load zone', key: 'outage', sign: +1, zones: ['houston', 'north', 'south', 'west'], get: (z) => (t) => outageValue(R.outage, z, ui.outageDef === 'resource_irr', t) },
+    { title: 'Outages by load zone', key: 'outage', sign: +1, zones: ['houston', 'north', 'south', 'west'], get: (z) => (t) => outageValue(R.outage, z, ui.outageDef, t) },
   ];
+  let anyZoneOffset = false;
   let html = `<table class="t"><thead><tr><th>Region</th><th class="num">Metis avg (MW)</th><th class="num">ERCOT avg (MW)</th><th class="num">&Delta; (MW)</th><th>Signal</th><th class="num">Hours</th></tr></thead><tbody>`;
   for (const g of groups) {
     html += `<tr class="group"><td colspan="6">${esc(g.title)}</td></tr>`;
     for (const z of g.zones) {
       const ser = S[`${g.key}:${z}`];
       const arr = ser ? ser.start.map((t, i) => pairAt(metisPoint(ser, i), g.get(z)(t), g.sign)) : [];
+      const zoff = ser && ui.offsets === 'remove' && g.key === 'outage' ? steadyOffset(arr, OFFSET_HOURS) : null;
+      if (zoff) { applyOffset(arr, zoff.offset); anyZoneOffset = true; }
       const lookup = ser ? new Map(ser.start.map((t, i) => [t, i])) : new Map();
       // The zone series use the same hours as the system series; map the window by start time.
       const idxZ = idx.map((i) => lookup.get(model.grid[i])).filter((v) => v !== undefined);
       const st = ser ? windowStats(arr, idxZ) : null;
-      const name = z.replace(/_/g, ' ');
-      html += st ? `<tr><td>${esc(name)}</td><td class="num">${fmtInt(st.metis)}</td><td class="num">${fmtInt(st.ercot)}</td><td class="num">${fmtSigned(st.delta)}</td><td>${signalHtml(st.z)}</td><td class="num">${st.n}/${idx.length}</td></tr>`
+      const name = z.replace(/_/g, ' ') + (zoff ? ` *` : '');
+      html += st ? `<tr><td${zoff ? ` title="steady offset of ${esc(fmtSigned(zoff.offset))} MW removed"` : ''}>${esc(name)}</td><td class="num">${fmtInt(st.metis)}</td><td class="num">${fmtInt(st.ercot)}</td><td class="num">${fmtSigned(st.delta)}</td><td>${signalHtml(st.z)}</td><td class="num">${st.n}/${idx.length}</td></tr>`
         : `<tr><td>${esc(name)}</td><td class="num">-</td><td class="num">-</td><td class="num">-</td><td><span class="sig none">${ser ? 'no overlapping hours' : 'no Metis series'}</span></td><td class="num">0</td></tr>`;
     }
   }
-  document.getElementById('zones').innerHTML = html + `</tbody></table>`;
+  document.getElementById('zones').innerHTML = html + `</tbody></table>` + (anyZoneOffset ? `<p class="hint" style="margin-top:8px">* a steady offset was removed for this region, as above. Hover the name to see its size.</p>` : '');
 }
 
 // ---- self-checks ----
@@ -653,7 +788,7 @@ function renderChecks() {
   const fitTable = (title, ser, cands, hint) => {
     if (!ser) return `<div><h2>${esc(title)}</h2><span class="badge">no Metis series</span></div>`;
     const f = definitionFit(ser, cands);
-    const rows = f.rows.map((r) => `<tr><td>${esc(r.label)}</td><td class="num">${r.mad === null ? '-' : fmtInt(r.mad)}</td><td class="num">${r.bias === null ? '-' : fmtSigned(r.bias)}</td><td>${f.best === r.key ? `<span class="badge best">closest${f.decisive ? '' : ' (narrowly)'}</span>` : ''}</td></tr>`).join('');
+    const rows = f.rows.map((r) => `<tr><td>${esc(r.label)}</td><td class="num">${r.mad === null ? '-' : fmtInt(r.mad)}</td><td class="num" title="${r.steady ? 'The gap never changes sign: Metis is on the same side of this ERCOT figure in nearly every hour. It need not be the same size every hour.' : ''}">${r.bias === null ? '-' : fmtSigned(r.bias)}${r.steady ? ' <span class="badge">steady</span>' : ''}</td><td>${f.best === r.key ? `<span class="badge best">closest${f.decisive ? '' : ' (narrowly)'}</span>` : ''}</td></tr>`).join('');
     return `<div><h2>${esc(title)}</h2><p class="hint">${hint}</p><table class="t"><thead><tr><th>ERCOT series</th><th class="num">MAD (MW)</th><th class="num">Bias (MW)</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   };
   html.push(fitTable('Which wind forecast does Metis track?', S['wind:system'], [
@@ -661,9 +796,16 @@ function renderChecks() {
   html.push(fitTable('Which solar forecast does Metis track?', S['solar:system'], [
     { key: 'stppf', label: 'STPPF', get: (t) => ercotVal(model.solarRep, 'system_stppf', t) }, { key: 'pvgrpp', label: 'PVGRPP', get: (t) => ercotVal(model.solarRep, 'system_pvgrpp', t) }], 'Bias is Metis minus ERCOT.'));
   html.push(fitTable('What does Metis mean by outage capacity?', S['outage:system'], [
-    { key: 'resource', label: 'Resource outages', get: (t) => outageValue(R.outage, 'system', false, t) }, { key: 'resource_irr', label: 'Resource + IRR (renewables)', get: (t) => outageValue(R.outage, 'system', true, t) }], 'The vendor does not define the series; this shows which ERCOT figure it matches. Use the closest as the default above.'));
+    { key: 'resource', label: 'Resource outages', get: (t) => outageValue(R.outage, 'system', 'resource', t) },
+    { key: 'resource_new', label: 'Resource + new-equipment outages', get: (t) => outageValue(R.outage, 'system', 'resource_new', t) },
+    { key: 'resource_irr', label: 'Resource + IRR (renewables)', get: (t) => outageValue(R.outage, 'system', 'resource_irr', t) },
+    { key: 'all', label: 'Resource + new equipment + IRR', get: (t) => outageValue(R.outage, 'system', 'all', t) }], 'Vendor, Oct 29: Metis uses the sum of the four zonal Total Resource MW columns (the "Resource outages" row), without IRR or new-equipment outages, so the definition is the same as ours. A bias with a "steady" tag means the gap never changes sign (Metis sits on the same side of that figure in nearly every hour), which points to a standing difference rather than a forecast disagreement; it does not mean the gap is the same size each hour. Because the definition matches, a steady outage gap is more likely Metis forecasting outages as they will later be reported, including ones not yet scheduled (not confirmed).'));
   html.push(fitTable('What does Metis mean by available capacity?', S['avail_cap:system'], [
-    { key: 'gen', label: 'Generation resources (availCapGen)', get: (t) => availValue(R.adequacy, 'gen', t) }, { key: 'gen_load', label: 'Generation + load resources', get: (t) => availValue(R.adequacy, 'gen_load', t) }], 'ERCOT\'s adequacy report is the only published capacity outlook. If neither matches closely, the vendor\'s definition differs from ERCOT\'s.'));
+    { key: 'zones', label: 'CapGenRes, zone sum (vendor\'s definition)', get: (t) => availValue(R.adequacy, 'zones', t) },
+    { key: 'total', label: 'CapGenRes total column', get: (t) => availValue(R.adequacy, 'total', t) },
+    { key: 'gen', label: 'availCapGen', get: (t) => availValue(R.adequacy, 'gen', t) },
+    { key: 'gen_load', label: 'availCapGen + load resources', get: (t) => availValue(R.adequacy, 'gen_load', t) }],
+    'Vendor, Oct 29: Metis uses the sum of the zonal CapGenRes columns, not availCapGen, and its target for an hour is ERCOT\'s own value for that hour from the report issued one hour earlier. So gaps should be small in the near term, and can widen at longer leads, where ERCOT\'s published value was made earlier.'));
   document.getElementById('checks').innerHTML = html.join('');
 }
 
@@ -690,15 +832,24 @@ function renderAll() {
     for (const id of ['summary', 'peak', 'strips', 'zones', 'checks']) document.getElementById(id).innerHTML = '';
     return;
   }
-  model = buildDrivers(ercot, metis, ui);
+  if (!ui.autoApplied) { Object.assign(ui, bestDefinitions(ercot, metis)); ui.autoApplied = true; } // once: start on the closest definitions
+  model = buildDrivers(ercot, metis, drvOpts());
   if (model) {
     // The same measured on-schedule rule as the feed cards, so the two can never disagree.
     const lateNote = (name, verb, ageMin, gap, st) => `${name} is ${st === 'stale' ? 'stale' : 'running late'}: ${verb} ${fmtAge(ageMin)} ago${gap ? ` (it usually arrives every ${gap} minutes)` : ''}, so differences involving it partly reflect its age.`;
     for (const id of Object.keys(ERCOT_NAMES)) {
       const r = ercot.reports[id];
       if (!r) continue;
+      // Of a pair that carries the same system numbers, only the newer is used for the system rows; the other (older) one
+      // matters only if it is the by-region report, whose zone rows depend on it.
+      const isSystemPair = id === 'wind_system' || id === 'solar_system';
+      const usedForSystem = id === 'wind_system' ? model.windRep === r : id === 'solar_system' ? model.solarRep === r : (id === 'wind' ? model.windRep === r : id === 'solar' ? model.solarRep === r : true);
+      if (isSystemPair && !usedForSystem) continue; // not used anywhere, so a warning about it would be noise
       const age = (now - Date.parse(r.posted_utc)) / 60000, gap = typicalGapMinutes(ercot.history && ercot.history[id], 'posted_utc'), st = feedState(age, gap);
-      if (st === 'late' || st === 'stale') notes.push(lateNote(ERCOT_NAMES[id], 'posted', age, gap, st));
+      if (st === 'late' || st === 'stale') {
+        const regional = id === 'wind' || id === 'solar';
+        notes.push(lateNote(ERCOT_NAMES[id], 'posted', age, gap, st).replace('so differences involving it partly reflect its age.', regional && !usedForSystem ? 'so only the by-region rows below depend on it (the system rows use the newer system report).' : 'so differences involving it partly reflect its age.'));
+      }
     }
     if (metis.issued_at) {
       const age = (now - Date.parse(metis.issued_at)) / 60000, gap = typicalGapMinutes(metis.vintage_log, 'issued_at'), st = feedState(age, gap);
@@ -710,8 +861,10 @@ function renderAll() {
   seg('segWindow', [[2, 'Next 2 h'], [12, '12 h'], [36, '36 h'], [47, 'All 47 h']], ui.windowHours, (v) => { ui.windowHours = v; renderAll(); });
   seg('segWind', [['stwpf', 'STWPF'], ['wgrpp', 'WGRPP']], ui.windBasis, (v) => { ui.windBasis = v; renderAll(); });
   seg('segSolar', [['stppf', 'STPPF'], ['pvgrpp', 'PVGRPP']], ui.solarBasis, (v) => { ui.solarBasis = v; renderAll(); });
-  seg('segOutage', [['resource', 'Resource'], ['resource_irr', '+ IRR']], ui.outageDef, (v) => { ui.outageDef = v; renderAll(); });
-  seg('segAvail', [['gen', 'Generation'], ['gen_load', '+ load res.']], ui.availDef, (v) => { ui.availDef = v; renderAll(); });
+  seg('segOutage', [['resource', 'Resource'], ['resource_new', '+ new equip.'], ['resource_irr', '+ IRR'], ['all', '+ both']], ui.outageDef, (v) => { ui.outageDef = v; renderAll(); });
+  seg('segOffsets', [['remove', 'Remove'], ['keep', 'Raw gaps']], ui.offsets, (v) => { ui.offsets = v; renderAll(); });
+  seg('segTight', [['no', 'No'], ['yes', 'Yes']], ui.tightOutages ? 'yes' : 'no', (v) => { ui.tightOutages = v === 'yes'; renderAll(); });
+  seg('segAvail', [['zones', 'CapGenRes (zones)'], ['gen', 'AvailCapGen'], ['gen_load', '+ load res.']], ui.availDef, (v) => { ui.availDef = v; renderAll(); });
   seg('segChart', [['load', 'Load'], ['wind', 'Wind'], ['solar', 'Solar'], ['outage', 'Outages'], ['avail', 'Available capacity'], ['imports', 'Net imports']], ui.chart, (v) => { ui.chart = v; renderAll(); });
   renderSummary(now);
   renderStrips(now);
