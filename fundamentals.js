@@ -29,7 +29,7 @@ export const METIS_STATE_KEY = 'metis_fund';
 export const ERCOT_RUNS_KEY = 'ercot_runs'; // a short log of every ERCOT run: where it executed and how it ended
 
 const ERCOT_SECRETS = ['ERCOT_API_USERNAME', 'ERCOT_API_PASSWORD', 'ERCOT_API_SUBSCRIPTION_KEY'];
-export const ERCOT_GROUPS = [['load', 'wind', 'solar'], ['wind_system', 'solar_system', 'outage'], ['adequacy']];
+export const ERCOT_GROUPS = [['load', 'wind', 'solar'], ['wind_system', 'solar_system', 'outage'], ['adequacy', 'load_actual']];
 const HISTORY_MAX = 48;
 const METIS_BASE = 'https://askthegrid.com/api/v1/grid/forecasts';
 const BATCH_MAX = 20; // the API's limit on reads per batch request

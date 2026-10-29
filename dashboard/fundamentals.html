@@ -844,7 +844,7 @@ function renderTrack() {
 
   // 1. who has been closer
   html += '<h3>Who has been closer to what happened?</h3>';
-  html += `<p class="hint">Mean absolute error in MW (lower is better) for forecasts made this many hours ahead, Metis first. <em>Band</em> is how often the actual landed inside Metis's own p10 to p90 range, which should be about 80%. A winner is only named once a lead range has ${MIN_PAIRS} or more scored forecast-hours.</p>`;
+  html += `<p class="hint">Mean absolute error in MW (lower is better) for forecasts made this many hours ahead, Metis first. <em>Band</em> is how often the actual landed inside Metis's own p10 to p90 range, which should be about 80%. A winner is only named once a lead range has ${MIN_PAIRS} or more scored forecast-hours. Wind and solar actuals arrive hourly; load actuals arrive once a day, so load joins this table with a delay of up to a day.</p>`;
   html += `<table class="t"><thead><tr><th>Series</th>${B.map((b) => `<th>${lead(b)} ahead</th>`).join('')}<th class="num">Hours scored</th></tr></thead><tbody>`;
   let fewest = Infinity;
   for (const k of ['load', 'wind', 'solar']) {
@@ -852,7 +852,7 @@ function renderTrack() {
     if (!sr) continue;
     const sc = sr.score, hrs = sc ? sc.hours_scored : 0;
     if (!sc || !sc.buckets || !sc.buckets.length) {
-      const why = k === 'load' && !hrs ? 'Not scored yet: ERCOT\'s actual-load report is not connected, so there is nothing to compare the load forecasts with. The forecasts themselves are being saved.' : 'No scored hours yet.';
+      const why = k === 'load' && !hrs ? 'Not scored yet. ERCOT posts actual load once a day, for the previous operating day, so load is scored in a daily batch after each morning\'s posting. The forecasts are being saved in the meantime.' : 'No scored hours yet.';
       html += `<tr><td>${esc(sr.label)}</td><td colspan="${B.length + 1}" style="white-space:normal;color:var(--text-secondary)">${esc(why)}</td></tr>`;
       continue;
     }

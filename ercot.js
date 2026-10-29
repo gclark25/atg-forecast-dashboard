@@ -331,6 +331,17 @@ export const REPORTS = {
     ],
     post: (v) => { v.resource_system = sumZones(v, 'resource'); v.irr_system = sumZones(v, 'irr'); v.new_equip_system = sumZones(v, 'new_equip'); },
   },
+  // Actual system load. Unlike the forecasts above it has no posting time: ERCOT posts it once a day for the previous
+  // operating day (seen live: at 1:16 PM the newest hour ended at midnight), and a request is simply "these operating
+  // days". So it is read in 'window' mode: one request for the last two operating days, and "unchanged" means the data
+  // still runs only as far as it did.
+  load_actual: {
+    source: 'NP6-345-CD', path: '/np6-345-cd/act_sys_load_by_wzn', mode: 'window', windowPastHours: 48,
+    what: 'actual system load by weather zone (posted once a day, for the previous operating day)',
+    dateField: 'operatingDay', heField: 'hourEnding', flagFields: ['DSTFlag'],
+    columns: [['total', 'total'], ['coast', 'coast'], ['east', 'east'], ['farWest', 'far_west'], ['north', 'north'],
+      ['northC', 'north_central'], ['southC', 'south_central'], ['southern', 'southern'], ['west', 'west']],
+  },
   adequacy: {
     source: 'NP3-763-CD', path: '/np3-763-cd/st_sys_adequacy', what: 'short-term system adequacy (hourly capacity outlook)',
     dateField: 'deliveryDate', heField: 'hourEnding', flagFields: ['repeatHourFlag'],
@@ -405,8 +416,47 @@ export function normalizeRows(spec, rows, names, window = null) {
 // asking only for anything posted after that. Nothing newer means an empty answer and nothing
 // is downloaded twice, which keeps the load on ERCOT's API as light as it can be.
 // ---------------------------------------------------------------------------
+// A report with no posting time (see load_actual): one request for a window of operating days.
+async function pullWindowReport(id, spec, env, opts) {
+  const nowMs = opts.nowMs ?? Date.now();
+  const o = { f: opts.f || fetch, sleep: opts.sleep || realSleep, retries: opts.retries, timeoutMs: opts.timeoutMs };
+  const started = Date.now();
+  let requests = 0;
+  try {
+    const window = {
+      fromDate: msToCtLocal(nowMs - (spec.windowPastHours ?? 48) * HOUR_MS).slice(0, 10),
+      toDate: msToCtLocal(nowMs).slice(0, 10),
+    };
+    const params = { [`${spec.dateField}From`]: window.fromDate, [`${spec.dateField}To`]: window.toDate, size: '20000' };
+    requests++;
+    const page = bodyToTable(await ercotGet(spec.path, params, env, o));
+    let rows = page.rows;
+    for (let p = 2; p <= Math.min(Number(page.meta.totalPages) || 1, 4); p++) {
+      await o.sleep(250);
+      requests++;
+      rows = rows.concat(bodyToTable(await ercotGet(spec.path, { ...params, page: String(p) }, env, o)).rows);
+    }
+    if (!rows.length) return { id, source: spec.source, ok: true, empty: true, requests, ms: Date.now() - started, intervals: [], missing_fields: [], note: `no rows for ${window.fromDate} to ${window.toDate}` };
+    const norm = normalizeRows(spec, rows, page.names, window);
+    if (!norm.intervals.length) return { id, source: spec.source, ok: true, empty: true, requests, ms: Date.now() - started, intervals: [], missing_fields: norm.missing, note: 'no usable rows in the window' };
+    // No posting time exists, so "posted" is how far the data runs: the end of its last hour.
+    const last = norm.intervals[norm.intervals.length - 1], throughMs = Date.parse(last.end), through = msToCtLocal(throughMs);
+    if (opts.since && opts.since[id] === through) return { id, source: spec.source, ok: true, unchanged: true, posted_ct: through, requests, ms: Date.now() - started };
+    return {
+      id, source: spec.source, ok: true, requests, ms: Date.now() - started,
+      posted_ct: through, posted_utc: new Date(throughMs).toISOString(), age_min: Math.round((nowMs - throughMs) / 60000),
+      rows_in_vintage: rows.length, rows_outside_window: norm.outside, window, intervals: norm.intervals,
+      date_counts: norm.dateCounts, first_raw: norm.firstRaw, last_raw: norm.lastRaw,
+      missing_fields: norm.missing, dropped_rows: norm.dropped, duplicate_intervals: norm.duplicates, server_side_filter: null,
+    };
+  } catch (e) {
+    return { id, source: spec.source, ok: false, requests, ms: Date.now() - started, error: { kind: e.kind || 'unexpected', status: e.status ?? null, message: String(e.message || e).slice(0, 300), ...(e.detail ? { detail: e.detail } : {}) } };
+  }
+}
+
 export async function pullReport(id, env, opts = {}) {
   const spec = REPORTS[id];
+  if (spec.mode === 'window') return pullWindowReport(id, spec, env, opts);
   const nowMs = opts.nowMs ?? Date.now();
   const o = { f: opts.f || fetch, sleep: opts.sleep || realSleep, retries: opts.retries, timeoutMs: opts.timeoutMs };
   const started = Date.now();
