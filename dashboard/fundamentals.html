@@ -77,6 +77,9 @@
   html[data-theme="dark"] .sig.bull.weak { color: var(--bull); }
   html[data-theme="dark"] .sig.bear.weak { color: var(--bear); }
   .peak { margin-top: 12px; font-size: 13px; line-height: 1.6; }
+  .tcell { line-height: 1.5; }
+  .tcell small { display: block; color: var(--text-secondary); font-size: 11px; font-weight: 400; }
+  .card h3 { font-size: 13px; margin: 16px 0 4px; }
   .offset-note { display: none; font-size: 12px; line-height: 1.55; margin: 0 0 12px; padding: 8px 12px; border-radius: 6px; border-left: 4px solid var(--late); background: var(--warn-bg); color: var(--warn-text); }
   .offset-note.show { display: block; }
   .muted { color: var(--text-secondary); font-size: 11px; font-weight: 400; display: block; }
@@ -153,6 +156,12 @@
   <h2>Hour by hour</h2>
   <div class="legend"><span>Bearish</span><span class="legend-bar"></span><span>Bullish</span><span style="margin-left:12px">Numbers are &Delta; in GW (Metis minus ERCOT). Colour is the gap in Metis standard deviations, saturating at 2. The outlined hours are the selected window.</span></div>
   <div id="strips"></div>
+</div>
+
+<div class="card" id="trackCard">
+  <h2>Track record</h2>
+  <p class="hint">Every hour the dashboard saves Metis's forecast and ERCOT's forecast as it stood when Metis was issued (the postings a forecaster issuing at :00 would have had), then scores both against what actually happened. This is the evidence for how much weight a gap deserves. It is collected in the background and nothing else on this page depends on it.</p>
+  <div id="track"></div>
 </div>
 
 <div class="card">
@@ -510,7 +519,7 @@ const ERCOT_NAMES = {
 const ui = { windowHours: 36, windBasis: 'stwpf', solarBasis: 'stppf', outageDef: 'resource', availDef: 'zones', offsets: 'remove', tightOutages: false, chart: 'load', autoApplied: false };
 const drvOpts = () => ({ ...ui, removeOffsets: ui.offsets === 'remove', tightOutages: ui.tightOutages, nightMask: true });
 const tightLabel = () => (ui.tightOutages ? 'Tightness (net load + outages)' : 'Tightness (net load only)');
-let ercot = null, metis = null, model = null, chart = null;
+let ercot = null, metis = null, model = null, chart = null, history = null;
 
 const CT_DATE = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' });
 const CT_TIME = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true });
@@ -810,8 +819,73 @@ function renderChecks() {
 }
 
 // ---------------------------------------------------------------------------
+// ---- the track record: who has been closer, and each series' usual gap ----
+const MIN_PAIRS = 48;   // fewer paired forecast-hours than this in a lead range: too early to call a winner
+function trackVerdict(m, e, n) {
+  if (!m || !e) return ['', '-'];
+  if (n < MIN_PAIRS) return ['', 'Building history'];
+  if (!(m.mae > 0) && !(e.mae > 0)) return ['', 'Both exact'];
+  if (!(e.mae > 0)) return ['warn', 'ERCOT closer'];
+  const r = m.mae / e.mae;
+  if (r < 0.95) return ['good', `Metis closer by ${Math.round((1 - r) * 100)}%`];
+  if (r > 1.05) return ['warn', `ERCOT closer by ${Math.round((1 - 1 / r) * 100)}%`];
+  return ['', 'About equal'];
+}
+function renderTrack() {
+  const el = document.getElementById('track');
+  if (!el) return;
+  if (!history) { el.innerHTML = '<p class="hint">Loading the history...</p>'; return; }
+  if (history.error) { el.innerHTML = `<p class="hint">The history is not available right now (${esc(history.error)}). It does not affect anything else on this page.</p>`; return; }
+  const sn = history.snapshots || {};
+  if (!sn.metis) { el.innerHTML = '<p class="hint">No snapshots saved yet. The first is taken at the next :05 and :58, and the track record fills in over the following hours and days.</p>'; return; }
+  const B = (history.buckets || []).map((b) => (Array.isArray(b) ? { lo: b[0], hi: b[1] } : b)), S = history.series || {};
+  const lead = (b) => `${b.lo}\u2013${b.hi} h`;
+  let html = `<p class="hint"><strong>${esc(sn.metis)}</strong> hourly Metis forecasts saved since ${esc(fmtDayTime(Date.parse(sn.first_issued_at)))}, latest ${esc(fmtDayTime(Date.parse(sn.last_issued_at)))}. ERCOT was captured as of issue time for ${esc(sn.ercot_asof)} of those hours. The tables use the last ${esc(history.window_days)} days.</p>`;
+
+  // 1. who has been closer
+  html += '<h3>Who has been closer to what happened?</h3>';
+  html += `<p class="hint">Mean absolute error in MW (lower is better) for forecasts made this many hours ahead, Metis first. <em>Band</em> is how often the actual landed inside Metis's own p10 to p90 range, which should be about 80%. A winner is only named once a lead range has ${MIN_PAIRS} or more scored forecast-hours.</p>`;
+  html += `<table class="t"><thead><tr><th>Series</th>${B.map((b) => `<th>${lead(b)} ahead</th>`).join('')}<th class="num">Hours scored</th></tr></thead><tbody>`;
+  let fewest = Infinity;
+  for (const k of ['load', 'wind', 'solar']) {
+    const sr = S[k];
+    if (!sr) continue;
+    const sc = sr.score, hrs = sc ? sc.hours_scored : 0;
+    if (!sc || !sc.buckets || !sc.buckets.length) {
+      const why = k === 'load' && !hrs ? 'Not scored yet: ERCOT\'s actual-load report is not connected, so there is nothing to compare the load forecasts with. The forecasts themselves are being saved.' : 'No scored hours yet.';
+      html += `<tr><td>${esc(sr.label)}</td><td colspan="${B.length + 1}" style="white-space:normal;color:var(--text-secondary)">${esc(why)}</td></tr>`;
+      continue;
+    }
+    fewest = Math.min(fewest, hrs);
+    html += `<tr><td>${esc(sr.label)}</td>`;
+    for (const b of sc.buckets) {
+      const [cls, txt] = trackVerdict(b.metis, b.ercot, b.n);
+      if (!b.metis || !b.ercot) { html += '<td>-</td>'; continue; }
+      html += `<td><div class="tcell">Metis ${fmtInt(b.metis.mae)} &middot; ERCOT ${fmtInt(b.ercot.mae)}<div style="margin:2px 0"><span class="badge ${cls}">${esc(txt)}</span></div><small>Metis bias ${fmtSigned(b.metis.bias)} &middot; band ${b.metis.cover === undefined ? '-' : Math.round(b.metis.cover * 100) + '%'} &middot; n ${fmtInt(b.n)}</small></div></td>`;
+    }
+    html += `<td class="num">${fmtInt(hrs)}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  if (Number.isFinite(fewest) && fewest < 72) html += '<p class="hint" style="margin-top:8px"><strong>Early days:</strong> fewer than 72 hours scored so far, so read these as first impressions, not conclusions.</p>';
+
+  // 2. each series' usual gap
+  html += '<h3>Each series\' usual gap (Metis minus ERCOT), by how far ahead</h3>';
+  html += '<p class="hint">Mean and spread (one standard deviation) of the gap in MW. Where a series sits on the same side of ERCOT\'s by a similar amount at a given lead, that is its normal gap: a gap near it is ordinary, and a gap far from it is the news. Outages and capacity have no actual value to score against, so only their usual gap is tracked.</p>';
+  html += `<table class="t"><thead><tr><th>Series</th>${B.map((b) => `<th>${lead(b)} ahead</th>`).join('')}</tr></thead><tbody>`;
+  for (const k of ['load', 'wind', 'solar', 'outage', 'avail_zones', 'avail_gen']) {
+    const sr = S[k];
+    if (!sr) continue;
+    if (!sr.gap) { html += `<tr><td>${esc(sr.label)}</td><td colspan="${B.length}" style="color:var(--text-secondary)">No paired hours yet</td></tr>`; continue; }
+    html += `<tr><td>${esc(sr.label)}</td>${sr.gap.buckets.map((b) => `<td title="${esc(fmtInt(b.n))} observations"><div class="tcell">${fmtSigned(b.mean)} <small>\u00b1 ${fmtInt(b.sd)}</small></div></td>`).join('')}</tr>`;
+  }
+  html += '</tbody></table>';
+  html += '<p class="hint" style="margin-top:8px">ERCOT\'s side is captured at about :05 each hour, from the postings that existed when Metis was issued. A capture taken more than 25 minutes after the issue time is left out of every comparison, so ERCOT never has newer information than Metis did.</p>';
+  el.innerHTML = html;
+}
+
 function renderAll() {
   const now = Date.now();
+  renderTrack();
   renderFeeds(now);
   const lu = document.getElementById('lastUpdated');
   const latest = Math.max(ercot && ercot.updated_at ? Date.parse(ercot.updated_at) : 0, metis && metis.updated_at ? Date.parse(metis.updated_at) : 0);
@@ -880,6 +954,9 @@ async function load() {
     const key = `${e && e.updated_at}|${m && m.updated_at}`;
     ercot = e; metis = m;
     showError('');
+    try { history = await fetchJson('data/history.json'); if (history === null) history = { error: 'not found' }; }
+    catch (err) { history = { error: err.message }; }
+    renderTrack();
     if (key !== lastKey) { lastKey = key; renderAll(); }
   } catch (err) {
     showError(`Could not load the fundamentals data: ${err.message}`);

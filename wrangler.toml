@@ -61,9 +61,18 @@ id = "4039b25afa8140269a13d17e060624c6"
 name = "ERCOT_RUNNER"
 class_name = "ErcotRunner"
 
+# The hourly snapshot history (history.js): SQLite inside a second Durable Object.
+[[durable_objects.bindings]]
+name = "HISTORY"
+class_name = "HistoryStore"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ErcotRunner"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["HistoryStore"]
 
 # Persists logs (including scheduled/cron invocation history) to the
 # dashboard so past runs are checkable after the fact, not just live via

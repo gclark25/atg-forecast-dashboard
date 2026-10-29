@@ -22,6 +22,7 @@
 import nodesConfig from './config/nodes.json';
 import { pullAll, summarize, REPORTS as ERCOT_REPORTS } from './ercot.js';
 import { runErcotJob, runMetisJob } from './fundamentals.js';
+import { History, runHistory } from './history.js';
 
 const BASE_URL = 'https://askthegrid.com';
 const FORECAST_PATH = '/api/v1/grid/forecasts';
@@ -565,6 +566,42 @@ async function runErcotInUs(env, opts = {}) {
   return last;
 }
 
+// ---- The hourly snapshot history (SQLite inside a Durable Object) ----
+//
+// Each hour it saves Metis's forecast and ERCOT's forecast as it stood when Metis was issued, pairs them, and scores
+// both against what actually happened (see history.js). It lives in a Durable Object because scoring joins an actual
+// hour against up to 47 earlier snapshots, which KV on the free plan cannot do within its limits. Everything here is
+// best-effort: a failure is logged and returned, and never touches the data jobs.
+export class HistoryStore {
+  constructor(state, env) {
+    this.env = env;
+    this.history = new History(state.storage.sql, (fn) => state.storage.transactionSync(fn));
+    state.blockConcurrencyWhile(async () => { this.history.migrate(); });
+  }
+  async fetch(request) {
+    const url = new URL(request.url);
+    const json = (o) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json' } });
+    if (url.pathname === '/summary') return json(this.history.summary(Date.now()));
+    if (url.pathname === '/tick') {
+      const p = url.searchParams.get('phase');
+      return json(await runHistory(this.history, (k) => this.env.FORECASTS_KV.get(k, 'json'), Date.now(), ['asof', 'metis', 'all'].includes(p) ? p : 'all'));
+    }
+    return new Response('not found', { status: 404 });
+  }
+}
+
+async function historyCall(env, path) {
+  if (!env.HISTORY) return { ok: false, error: 'no_history_binding' };
+  try {
+    const stub = env.HISTORY.get(env.HISTORY.idFromName('main'));
+    const res = await stub.fetch(`https://history.internal${path}`);
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e).slice(0, 200) };
+  }
+}
+const historyTick = (env, phase) => historyCall(env, `/tick?phase=${phase}`);
+
 // ---- A plain-text read-out of how the scheduled ERCOT runs have gone ----
 //
 // /debug/ercot-log (site password required) prints the run log as a table, a tally by the place each run
@@ -677,9 +714,15 @@ export default {
     if (minute in ERCOT_JOB_GROUP_BY_MINUTE) {
       ctx.waitUntil(runErcotInUs(env, { groups: [ERCOT_JOB_GROUP_BY_MINUTE[minute]] }).then((r) => console.log('ercot job:', JSON.stringify(r))));
     } else if (METIS_JOB_MINUTES.includes(minute)) {
-      ctx.waitUntil(runMetisJob(env).then((r) => console.log('metis job:', JSON.stringify(r))));
+      ctx.waitUntil(runMetisJob(env).then((r) => {
+        console.log('metis job:', JSON.stringify(r));
+        // :58, after the :38 and :48 runs have fetched the hour's forecast: store it in the history and pair it
+        if (minute === 58) return historyTick(env, 'metis').then((h) => console.log('history:', JSON.stringify(h)));
+      }));
     } else {
       ctx.waitUntil(pullAndStore(env));
+      // :05, just after ERCOT's :03 run: capture ERCOT's forecasts as they stood when Metis was issued, take in new actuals, score
+      if (minute === 5) ctx.waitUntil(historyTick(env, 'all').then((h) => console.log('history:', JSON.stringify(h))));
     }
   },
 
@@ -715,6 +758,19 @@ export default {
       const groups = g && /^[1-3]$/.test(g) ? [Number(g) - 1] : undefined;
       const result = url.pathname === '/debug/run-ercot' ? await runErcotInUs(env, { groups }) : await runMetisJob(env);
       return jsonResponse(result);
+    }
+
+    // The history, for the page: the usual gap by lead time and the scorecard. Behind the site password like every route.
+    if (url.pathname === '/data/history.json') {
+      const s = await historyCall(env, '/summary');
+      return s && s.series ? new Response(JSON.stringify(s), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
+        : jsonResponse({ error: 'history_unavailable', detail: s && s.error }, 503);
+    }
+    // Run the history job by hand: /debug/run-history?key=...&phase=asof|metis|all (default all)
+    if (url.pathname === '/debug/run-history') {
+      if (url.searchParams.get('key') !== env.ASKTHEGRID_API_KEY) return jsonResponse({ error: 'bad_key' }, 403);
+      const p = url.searchParams.get('phase');
+      return jsonResponse(await historyTick(env, ['asof', 'metis', 'all'].includes(p) ? p : 'all'));
     }
 
     if (url.pathname === '/api/chat/status') {
