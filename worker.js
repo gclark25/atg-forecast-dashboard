@@ -20,6 +20,7 @@
  */
 
 import nodesConfig from './config/nodes.json';
+import { pullAll, summarize, REPORTS as ERCOT_REPORTS } from './ercot.js';
 
 const BASE_URL = 'https://askthegrid.com';
 const FORECAST_PATH = '/api/v1/grid/forecasts';
@@ -452,6 +453,58 @@ async function handleChat(request, env) {
   });
 }
 
+// ---- ERCOT connectivity + data check (read-only; stores nothing) ----
+//
+// Visit /debug/ercot-check (site password required). It signs in to ERCOT's
+// public API from this Worker, pulls the reports the fundamentals tab will use,
+// and returns a short credential-free summary: did it work from Cloudflare's
+// network, how fresh is each report, did an expected column go missing.
+//
+//   /debug/ercot-check                  all seven reports (about 14 ERCOT requests)
+//   /debug/ercot-check?only=load,wind   just those (use this if one request is too much work
+//                                       for the free plan's 10 ms CPU limit)
+//
+// ERCOT documents a limit of 30 requests a minute. This route keeps a running
+// count of what it has spent in the last minute and refuses to go over 25.
+const ERCOT_SECRETS = ['ERCOT_API_USERNAME', 'ERCOT_API_PASSWORD', 'ERCOT_API_SUBSCRIPTION_KEY'];
+const ERCOT_MINUTE_BUDGET = 25;
+let ercotSpend = []; // [timestampMs, requestsSpent]
+
+async function handleErcotCheck(request, env) {
+  const missing = ERCOT_SECRETS.filter((k) => typeof env[k] !== 'string' || !env[k].replace(/[\r\n]+$/, '').length);
+  if (missing.length) return jsonResponse({ error: 'ercot_secrets_missing', missing }, 503);
+
+  const onlyParam = new URL(request.url).searchParams.get('only');
+  const ids = onlyParam ? onlyParam.split(',').map((x) => x.trim()).filter(Boolean) : Object.keys(ERCOT_REPORTS);
+  const unknown = ids.filter((id) => !(id in ERCOT_REPORTS));
+  if (unknown.length || !ids.length) return jsonResponse({ error: 'unknown_report', unknown, valid: Object.keys(ERCOT_REPORTS) }, 400);
+
+  const now = Date.now();
+  ercotSpend = ercotSpend.filter(([t]) => now - t < 60000);
+  const spent = ercotSpend.reduce((a, [, n]) => a + n, 0);
+  const planned = ids.length * 2 + 1;
+  if (spent + planned > ERCOT_MINUTE_BUDGET) {
+    const oldest = ercotSpend.length ? ercotSpend[0][0] : now;
+    return jsonResponse({ error: 'too_soon', spent_last_minute: spent, retry_in_seconds: Math.max(1, Math.ceil((60000 - (now - oldest)) / 1000)) }, 429);
+  }
+  // A stray trailing newline from `wrangler secret put` would otherwise break sign-in.
+  const ercotEnv = Object.fromEntries(ERCOT_SECRETS.map((k) => [k, env[k].replace(/[\r\n]+$/, '')]));
+  const results = await pullAll(ercotEnv, { nowMs: now, ids });
+  const reports = {};
+  let used = 1; // the sign-in
+  for (const [id, r] of Object.entries(results)) { reports[id] = summarize(r); used += r.requests || 0; }
+  ercotSpend.push([now, used]);
+  const cf = request.cf || {};
+  return jsonResponse({
+    checked_at: new Date(now).toISOString(),
+    total_ms: Date.now() - now,
+    worker_location: { colo: cf.colo || null, country: cf.country || null },
+    all_ok: Object.values(reports).every((r) => r.ok),
+    ercot_requests_this_call: used,
+    reports,
+  });
+}
+
 // ---- Site password gate (HTTP Basic) ----
 //
 // Every request to the site goes through fetch() below, and this check runs
@@ -536,6 +589,10 @@ export default {
     if (url.pathname === '/debug/run-pull' && url.searchParams.get('key') === env.ASKTHEGRID_API_KEY) {
       await pullAndStore(env);
       return new Response('Pull complete -- check Observability logs and /data/manifest.json', { status: 200 });
+    }
+
+    if (url.pathname === '/debug/ercot-check') {
+      return handleErcotCheck(request, env);
     }
 
     if (url.pathname === '/api/chat/status') {
