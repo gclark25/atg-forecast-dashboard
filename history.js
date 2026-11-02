@@ -29,6 +29,9 @@ export const SCORE_HOURS_PER_TICK = 12;     // actual hours scored per run, so a
 export const ACTUAL_LOOKBACK_H = 72;
 export const BUCKETS = [[1, 3], [4, 6], [7, 12], [13, 24], [25, 47]];
 export const MODELS = ['metis', 'ercot'];
+export const LOG_KEEP_DAYS = 14;           // the job log
+export const LOG_SUMMARY_DAYS = 7;         // how much of it the report gets
+export const DAY_LEADS = 36;               // the by-day consistency view pools leads 1 to 36
 
 const ZONES = ['south', 'north', 'west', 'houston'];
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -113,6 +116,10 @@ export class History {
       'CREATE TABLE IF NOT EXISTS gap_day (day TEXT NOT NULL, series TEXT NOT NULL, n TEXT, s TEXT, ss TEXT, PRIMARY KEY (day, series))',
       'CREATE TABLE IF NOT EXISTS score_day (day TEXT NOT NULL, series TEXT NOT NULL, model TEXT NOT NULL, n TEXT, sabs TEXT, serr TEXT, ssq TEXT, cov TEXT, PRIMARY KEY (day, series, model))',
       'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)',
+      // What the Metis job and the snapshot step did, one row each: so a gap can be diagnosed afterwards (did the job run, what did the probe see,
+      // did the round finish, was the snapshot saved). kind = 'run' (a Metis job run) or 'snapshot' (an attempt to save an issue).
+      'CREATE TABLE IF NOT EXISTS metis_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, kind TEXT NOT NULL, outcome TEXT NOT NULL, issued_ms INTEGER, detail TEXT)',
+      'CREATE INDEX IF NOT EXISTS metis_log_at ON metis_log (at_ms)',
     ];
     for (const q of t) this.run(q);
   }
@@ -155,8 +162,19 @@ export class History {
 
   // ---- Metis, as issued at T ----
   recordMetis(nowMs, metis) {
+    const r = this.recordMetisInner(nowMs, metis);
+    try {   // logging must never get in the way of saving
+      if (r.skipped !== 'already_stored') {
+        this.run('INSERT INTO metis_log (at_ms, kind, outcome, issued_ms, detail) VALUES (?, ?, ?, ?, ?)', nowMs, 'snapshot',
+          r.skipped ? 'skipped_' + r.skipped : 'stored', Number.isFinite(r.issued_ms) ? r.issued_ms : null, r.skipped ? null : `stored=${r.stored.length} paired=${r.paired.length}`);
+      }
+    } catch (e) { /* ignore */ }
+    return r;
+  }
+
+  recordMetisInner(nowMs, metis) {
     if (!metis || !metis.issued_at || !metis.series) return { skipped: 'no_metis_data' };
-    if (metis.complete === false) return { skipped: 'incomplete' };
+    if (metis.complete === false) return { skipped: 'incomplete', issued_ms: Date.parse(metis.issued_at) };
     const T = Date.parse(metis.issued_at);
     if (!Number.isFinite(T)) return { skipped: 'bad_issue_time' };
     if (this.all('SELECT 1 AS x FROM metis_snap WHERE issued_ms = ? LIMIT 1', T).length) return { skipped: 'already_stored', issued_ms: T };
@@ -197,6 +215,24 @@ export class History {
       }
     });
     return out;
+  }
+
+  // One Metis job run, as returned by runMetisJob (or the error it threw)
+  recordMetisRun(nowMs, minute, r) {
+    if (!r || typeof r !== 'object') return { skipped: 'no_result' };
+    let outcome;
+    if (r.ok === false && r.error) outcome = String(r.error).slice(0, 40);
+    else if (r.unchanged) outcome = 'unchanged';
+    else if (r.complete) outcome = 'complete';
+    else outcome = 'partial';
+    const issued = r.issued_at ? Date.parse(r.issued_at) : null;
+    const bits = [];
+    if (minute !== undefined && minute !== null) bits.push('minute=' + minute); else bits.push('manual');
+    for (const k of ['fetched_this_run', 'remaining', 'requests', 'ms']) if (r[k] !== undefined) bits.push(k.replace('_this_run', '') + '=' + r[k]);
+    if (r.ok === false && !r.error) bits.push('some series errored');
+    if (r.message) bits.push(String(r.message).slice(0, 120));
+    this.run('INSERT INTO metis_log (at_ms, kind, outcome, issued_ms, detail) VALUES (?, ?, ?, ?, ?)', nowMs, 'run', outcome, Number.isFinite(issued) ? issued : null, bits.join(' ').slice(0, 220));
+    return { logged: outcome };
   }
 
   // adds arrays into a daily bucket (creating it if needed)
@@ -277,6 +313,7 @@ export class History {
       this.run('DELETE FROM ercot_asof WHERE asof_ms < ?', cut);
       this.run('DELETE FROM actual WHERE t < ?', cut);
       this.run('DELETE FROM hour_scored WHERE t < ?', cut);
+      this.run('DELETE FROM metis_log WHERE at_ms < ?', nowMs - LOG_KEEP_DAYS * 24 * HOUR);
       this.run('DELETE FROM gap_day WHERE day < ?', dayOf(nowMs - KEEP_AGG_DAYS * 24 * HOUR));
       this.run('DELETE FROM score_day WHERE day < ?', dayOf(nowMs - KEEP_AGG_DAYS * 24 * HOUR));
       this.run("INSERT OR REPLACE INTO meta (k, v) VALUES ('cleaned_day', ?)", today);
@@ -284,8 +321,30 @@ export class History {
     return { cleaned: true };
   }
 
+  // The job log by clock hour (UTC), for the report: how many runs, with what outcomes, which issues the probe saw, and any snapshot outcome.
+  metisRunsByHour(nowMs) {
+    const first = this.all("SELECT MIN(at_ms) AS m FROM metis_log WHERE kind = 'run'")[0];   // when the RUN log began (snapshot rows can predate it)
+    const rows = this.all('SELECT at_ms, kind, outcome, issued_ms, detail FROM metis_log WHERE at_ms >= ? ORDER BY at_ms', nowMs - LOG_SUMMARY_DAYS * 24 * HOUR);
+    const hours = new Map();
+    for (const r of rows) {
+      const h = Math.floor(r.at_ms / HOUR) * HOUR;
+      const o = hours.get(h) || { h, runs: 0, out: {}, issued: null, snap: [], notes: [] };
+      if (r.kind === 'run') {
+        o.runs++;
+        o.out[r.outcome] = (o.out[r.outcome] || 0) + 1;
+        if (r.issued_ms !== null && r.issued_ms !== undefined) o.issued = o.issued ? [Math.min(o.issued[0], r.issued_ms), Math.max(o.issued[1], r.issued_ms)] : [r.issued_ms, r.issued_ms];
+        if (r.outcome !== 'unchanged' && r.outcome !== 'complete' && o.notes.length < 3) o.notes.push(`${r.outcome}: ${r.detail || ''}`.slice(0, 160));
+      } else {
+        o.snap.push(r.outcome + (r.issued_ms ? ' (issue ' + new Date(r.issued_ms).toISOString().slice(5, 16) + 'Z)' : ''));
+      }
+      hours.set(h, o);
+    }
+    return { since_ms: first && first.m !== null ? first.m : null, hours: [...hours.values()] };
+  }
+
   // ---- what the page reads ----
-  summary(nowMs) {
+  summary(nowMs, opts = {}) {
+    const detail = opts.detail !== false;   // the page asks for detail: false; the report asks for the lot
     const since = dayOf(nowMs - AGG_DAYS * 24 * HOUR);
     const sum = (rows, cols) => {
       const acc = {};
@@ -305,7 +364,15 @@ export class History {
     const result = {
       generated_at: new Date(nowMs).toISOString(), window_days: AGG_DAYS, leads: LEADS, buckets: BUCKETS,
       snapshots: { metis: snaps.n || 0, first_issued_at: snaps.first ? new Date(snaps.first).toISOString() : null, last_issued_at: snaps.last ? new Date(snaps.last).toISOString() : null,
-        ercot_asof: count('SELECT COUNT(DISTINCT asof_ms) AS n FROM ercot_asof') },
+        ercot_asof: count('SELECT COUNT(DISTINCT asof_ms) AS n FROM ercot_asof'),
+        ...(detail ? {
+          // every issue time we hold (UTC ms), so the hours we do NOT have can be listed
+          issued_ms: this.all('SELECT issued_ms FROM metis_snap WHERE mseries = ? ORDER BY issued_ms', 'load:system').map((r) => r.issued_ms),
+          // when ERCOT's own report was posted, as captured at each issue hour: [asof_ms, posted_ms]. Shows whether ERCOT's inputs were stale
+          // during a gap in Metis's issues. Last 14 days.
+          ercot_posted: Object.fromEntries(['wind', 'load', 'outage', 'avail_gen'].map((n) => [n, this.all('SELECT asof_ms, posted_ms FROM ercot_asof WHERE series = ? AND asof_ms >= ? AND posted_ms IS NOT NULL ORDER BY asof_ms', n, nowMs - 14 * 24 * HOUR).map((r) => [r.asof_ms, r.posted_ms])])),
+          metis_runs: this.metisRunsByHour(nowMs),
+        } : {}) },
       series: {},
     };
     for (const [name, def] of Object.entries(SERIES)) {
@@ -328,8 +395,32 @@ export class History {
         const rows = this.all('SELECT model, n, sabs, serr, ssq, cov FROM score_day WHERE series = ? AND day >= ?', name, since);
         const byModel = Object.fromEntries(MODELS.map((m) => [m, sum(rows.filter((r) => r.model === m), ['n', 'sabs', 'serr', 'ssq', 'cov'])]));
         const have = byModel.metis.n && byModel.metis.n.some((v) => v > 0);
+        // The same sums by single lead (1 to 47 hours ahead), so any window can be cut from them: under two hours, out to 36, and so on.
+        const perLead = [];
+        if (have && detail) {
+          for (let i = 0; i < LEADS; i++) {
+            const m = byModel.metis, e = byModel.ercot, n = m.n[i];
+            if (!n) continue;
+            perLead.push({
+              lead: i + 1, n,
+              metis: { mae: round1(m.sabs[i] / n), bias: round1(m.serr[i] / n), rmse: round1(Math.sqrt(m.ssq[i] / n)), cover: Math.round((m.cov[i] / n) * 1000) / 1000 },
+              ercot: e.n && e.n[i] ? { mae: round1(e.sabs[i] / e.n[i]), bias: round1(e.serr[i] / e.n[i]), rmse: round1(Math.sqrt(e.ssq[i] / e.n[i])) } : null,
+            });
+          }
+        }
+        const byDay = new Map();
+        for (const r of (detail ? this.all('SELECT day, model, n, sabs FROM score_day WHERE series = ? AND day >= ? ORDER BY day', name, since) : [])) {
+          const n = parse(r.n) || [], sa = parse(r.sabs) || [];
+          let N = 0, SA = 0;
+          for (let i = 0; i < DAY_LEADS; i++) { if (isNum(n[i])) N += n[i]; if (isNum(sa[i])) SA += sa[i]; }
+          const o = byDay.get(r.day) || { day: r.day };
+          o[r.model] = { n: N, mae: N ? SA / N : null };
+          byDay.set(r.day, o);
+        }
+        const days = [...byDay.values()].filter((o) => o.metis && o.metis.n).map((o) => ({ day: o.day, n: o.metis.n, metis_mae: round1(o.metis.mae), ercot_mae: o.ercot ? round1(o.ercot.mae) : null }));
         score = {
           hours_scored: scoredHours[name] || 0,
+          ...(detail ? { days_leads: [1, DAY_LEADS], days, leads: perLead } : {}),
           buckets: have ? BUCKETS.map(([lo, hi]) => {
             const stats = (m) => {
               const a = byModel[m], n = within(a.n, lo, hi);
@@ -342,7 +433,10 @@ export class History {
           }) : [],
         };
       }
-      result.series[name] = { label: def.label, has_actuals: !!def.scored, gap: gapBuckets ? { buckets: gapBuckets, leads: gapRows } : null, score };
+      // What actually happened, by UTC day (the first and last days are partial: see `hours`)
+      const actuals = def.scored && detail ? this.all("SELECT strftime('%Y-%m-%d', t / 1000, 'unixepoch') AS day, COUNT(*) AS n, AVG(v) AS mean, MIN(v) AS lo, MAX(v) AS hi FROM actual WHERE series = ? GROUP BY day ORDER BY day", name)
+        .map((r) => ({ day: r.day, hours: r.n, mean: round1(r.mean), min: round1(r.lo), max: round1(r.hi) })) : undefined;
+      result.series[name] = { label: def.label, has_actuals: !!def.scored, actuals, gap: gapBuckets ? { buckets: gapBuckets, leads: gapRows } : null, score };
     }
     return result;
   }

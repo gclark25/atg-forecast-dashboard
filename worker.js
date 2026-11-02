@@ -581,7 +581,12 @@ export class HistoryStore {
   async fetch(request) {
     const url = new URL(request.url);
     const json = (o) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json' } });
-    if (url.pathname === '/summary') return json(this.history.summary(Date.now()));
+    if (url.pathname === '/summary') return json(this.history.summary(Date.now(), { detail: url.searchParams.get('detail') === '1' }));
+    if (url.pathname === '/metis-run' && request.method === 'POST') {
+      let body = null;
+      try { body = await request.json(); } catch (e) { /* a bad body is just not logged */ }
+      return json(this.history.recordMetisRun(Date.now(), body ? body.minute : null, body ? body.result : null));
+    }
     if (url.pathname === '/tick') {
       const p = url.searchParams.get('phase');
       return json(await runHistory(this.history, (k) => this.env.FORECASTS_KV.get(k, 'json'), Date.now(), ['asof', 'metis', 'all'].includes(p) ? p : 'all'));
@@ -590,17 +595,29 @@ export class HistoryStore {
   }
 }
 
-async function historyCall(env, path) {
+async function historyCall(env, path, init) {
   if (!env.HISTORY) return { ok: false, error: 'no_history_binding' };
   try {
     const stub = env.HISTORY.get(env.HISTORY.idFromName('main'));
-    const res = await stub.fetch(`https://history.internal${path}`);
+    const res = await stub.fetch(`https://history.internal${path}`, init);
     return await res.json();
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e).slice(0, 200) };
   }
 }
 const historyTick = (env, phase) => historyCall(env, `/tick?phase=${phase}`);
+
+// Record one Metis job run in the history (what the probe saw, whether the round finished, any error), so a gap can be diagnosed later.
+// `minute` is the cron minute, or null for a run started by hand. Never throws.
+const logMetisRun = (env, minute, result) => historyCall(env, '/metis-run', { method: 'POST', body: JSON.stringify({ minute: minute === undefined ? null : minute, result }) });
+
+// The job itself, with anything it throws turned into a recordable result instead of an unhandled failure.
+const runMetisLogged = async (env, minute) => {
+  let r;
+  try { r = await runMetisJob(env); } catch (e) { r = { ok: false, error: 'job_threw', message: String((e && e.message) || e).slice(0, 200) }; }
+  await logMetisRun(env, minute, r);
+  return r;
+};
 
 // ---- A plain-text read-out of how the scheduled ERCOT runs have gone ----
 //
@@ -714,7 +731,7 @@ export default {
     if (minute in ERCOT_JOB_GROUP_BY_MINUTE) {
       ctx.waitUntil(runErcotInUs(env, { groups: [ERCOT_JOB_GROUP_BY_MINUTE[minute]] }).then((r) => console.log('ercot job:', JSON.stringify(r))));
     } else if (METIS_JOB_MINUTES.includes(minute)) {
-      ctx.waitUntil(runMetisJob(env).then((r) => {
+      ctx.waitUntil(runMetisLogged(env, minute).then((r) => {
         console.log('metis job:', JSON.stringify(r));
         // :58, after the :38 and :48 runs have fetched the hour's forecast: store it in the history and pair it
         if (minute === 58) return historyTick(env, 'metis').then((h) => console.log('history:', JSON.stringify(h)));
@@ -756,13 +773,13 @@ export default {
       if (url.searchParams.get('key') !== env.ASKTHEGRID_API_KEY) return jsonResponse({ error: 'bad_key' }, 403);
       const g = url.searchParams.get('group'); // /debug/run-ercot?key=...&group=1 runs just the first group (1-3)
       const groups = g && /^[1-3]$/.test(g) ? [Number(g) - 1] : undefined;
-      const result = url.pathname === '/debug/run-ercot' ? await runErcotInUs(env, { groups }) : await runMetisJob(env);
+      const result = url.pathname === '/debug/run-ercot' ? await runErcotInUs(env, { groups }) : await runMetisLogged(env, null);
       return jsonResponse(result);
     }
 
     // The history, for the page: the usual gap by lead time and the scorecard. Behind the site password like every route.
     if (url.pathname === '/data/history.json') {
-      const s = await historyCall(env, '/summary');
+      const s = await historyCall(env, url.searchParams.get('detail') === '1' ? '/summary?detail=1' : '/summary');
       return s && s.series ? new Response(JSON.stringify(s), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
         : jsonResponse({ error: 'history_unavailable', detail: s && s.error }, 503);
     }
